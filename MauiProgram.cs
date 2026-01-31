@@ -21,7 +21,7 @@ public static class MauiProgram
                 fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
                 fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
                 // Remova se não tiver esse arquivo:
-                fonts.AddFont("NotoColorEmoji.ttf", "NotoColorEmoji");
+                //fonts.AddFont("NotoColorEmoji.ttf", "NotoColorEmoji");
             });
 
 #if DEBUG

@@ -17,6 +17,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Plugin.LocalNotification;
+using Microsoft.Maui.Devices;
 
 
 namespace Kflmulti
@@ -72,6 +73,8 @@ namespace Kflmulti
 
 
         private double _fundoSaldo = 0.0;
+        private double _SaldoFake = 320000;
+        bool fake = Preferences.Default.Get("FAKE_FLAG", false);
         private List<InvestmentCard> _investments = new();
 
 
@@ -205,7 +208,7 @@ namespace Kflmulti
 #endif
 
 
-            // await ClearAppCacheAsync();
+           // await ClearAppCacheAsync();
         }
 
         protected override async void OnDisappearing()
@@ -645,268 +648,119 @@ namespace Kflmulti
             await ExecutarComLoader(async () =>
             {
                 CarregarInvestimentos();
-            RegistrarCustoDiarioFundoIfNeeded();
-
-            
+                RegistrarCustoDiarioFundoIfNeeded();
 
                 var background = Color.FromArgb("#FFFFFF");
                 var layout = new VerticalStackLayout { Padding = 12, Spacing = 10, BackgroundColor = background };
 
                 var valorInv = new Label { TextColor = Colors.Black };
 
-                // 1) Prefetch preços (uma chamada por ativo) e coleta status de atualização
                 var preçoPorAtivo = new Dictionary<string, double?>(StringComparer.OrdinalIgnoreCase);
                 int updatedTodayCount = 0;
                 int oldCacheCount = 0;
                 int missingCount = 0;
                 string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-                // Adicione estas declarações entre os campos privados da classe MainPage (perto de _fundoSaldo, _investments etc.)
-
 
                 layout.Add(valorInv);
 
-                var lblTitle = new Label { Text = "INVESTIMENTOS", FontSize = 20, FontAttributes = FontAttributes.Bold, HorizontalOptions = LayoutOptions.Center, TextColor = Colors.Black };
+                var lblTitle = new Label
+                {
+                    Text = "INVESTIMENTOS",
+                    FontSize = 20,
+                    FontAttributes = FontAttributes.Bold,
+                    HorizontalOptions = LayoutOptions.Center,
+                    TextColor = Colors.Black
+                };
                 layout.Add(lblTitle);
 
-                // card saldo (com botão +)
-                layout.Add(CriarCardAdicionar("🏦", "SALDO INVESTIMENTO", _fundoSaldo, Color.FromArgb("#2E7D32"), () => { _ = AdicionarAoFundoPrompt(); }));
+                layout.Add(CriarCardAdicionar("🏦", "SALDO INVESTIMENTO", _fundoSaldo,
+                    Color.FromArgb("#2E7D32"), () => { _ = AdicionarAoFundoPrompt(); }));
 
-            
                 CarregarJurosCdbFromPrefs();
                 await RegistrarJurosCdbIfNeeded();
-           
 
+                // Pre-fetch de preços
+                foreach (var inv in _investments.OrderBy(i => i.Name))
+                {
+                    if (string.IsNullOrWhiteSpace(inv?.Name)) continue;
+                    var invNameTrim = inv.Name.Trim();
+                    if (invNameTrim.Equals("CDB PESSOAL", StringComparison.OrdinalIgnoreCase) ||
+                        invNameTrim.Equals("CDB EMPRESA", StringComparison.OrdinalIgnoreCase))
+                        continue;
 
+                    string symbol = invNameTrim + ".SA";
+                    double? preco = await GetDailyStockPriceAsync(symbol);
+                    preçoPorAtivo[inv.Name ?? ""] = preco;
 
-            // espaço para cards
-            var stackCards = new VerticalStackLayout { Spacing = 8 };
+                    var keyDate = $"stock_price_daily_{SanitizeKey(symbol.ToUpperInvariant())}_date";
+                    var savedDate = Preferences.Default.Get(keyDate, "");
+                    if (!string.IsNullOrEmpty(savedDate) && savedDate == today)
+                        updatedTodayCount++;
+                    else if (preco.HasValue)
+                        oldCacheCount++;
+                    else
+                        missingCount++;
+                }
+
+                // Totais por categoria
+                decimal totalRendaFixa = 0m;
+                decimal totalAcoes = 0m;
+                decimal totalFiis = 0m;
+
+                foreach (var inv in _investments)
+                {
+                    double? preco = preçoPorAtivo.ContainsKey(inv.Name ?? "") ? preçoPorAtivo[inv.Name ?? ""] : null;
+                    decimal unitPrice = (decimal)(preco ?? inv.PricePerUnit);
+                    decimal valor = unitPrice * (decimal)inv.Quantity;
+
+                    string invNameUpper = (inv.Name ?? "").Trim().ToUpperInvariant();
+
+                    if (invNameUpper.Contains("CDB"))
+                        totalRendaFixa += valor;
+                    else if (invNameUpper.Contains("BBSE3") || invNameUpper.Contains("ITUB4") || invNameUpper.Contains("PETR4"))
+                        totalAcoes += valor;
+                    else
+                        totalFiis += valor;
+                }
+
+                decimal somaTotal = totalRendaFixa + totalAcoes + totalFiis;
+                somaTotal = Math.Round(somaTotal, 2);
+                double jurosTotalCdb = Math.Round(jurosCdbPessoal + jurosCdbEmpresa, 2);
+                double valorTotalComJuros = (double)somaTotal + jurosTotalCdb + _SaldoFake;
+
+                // Card total
+                layout.Add(CriarCardAdicionar("💼", "INVESTIMENTO TOTAL",
+                    (double)valorTotalComJuros, Color.FromArgb("#1B5E20"), () => { _ = AdicionarAoFundoPromptFake(); }));
+
+                // Porcentagens em cards modernos
+                double pctRendaFixa = somaTotal > 0 ? (double)(totalRendaFixa / somaTotal * 100) : 0;
+                double pctAcoes = somaTotal > 0 ? (double)(totalAcoes / somaTotal * 100) : 0;
+                double pctFiis = somaTotal > 0 ? (double)(totalFiis / somaTotal * 100) : 0;
+
+                layout.Add(CriarCardPercentual("📈", "Renda Fixa", pctRendaFixa, Color.FromArgb("#2E7D32")));
+                layout.Add(CriarCardPercentual("💹", "Ações", pctAcoes, Color.FromArgb("#1565C0")));
+                layout.Add(CriarCardPercentual("🏢", "FIIs", pctFiis, Color.FromArgb("#6A1B9A")));
 
                 if (_investments.Count == 0)
                 {
-                    // mostra primeiro (sem total de mercado)
-                    layout.Add(CriarCardNaoEditavel("💼", "INVESTIMENTO TOTAL", 0.0, Color.FromArgb("#1B5E20")));
-                    stackCards.Add(new Label { Text = "Nenhum investimento cadastrado.", TextColor = Colors.DimGray, HorizontalOptions = LayoutOptions.Center });
+                    layout.Add(new Label
+                    {
+                        Text = "Nenhum investimento cadastrado.",
+                        TextColor = Colors.DimGray,
+                        HorizontalOptions = LayoutOptions.Center
+                    });
                 }
                 else
                 {
-                    // Pre-fetch de preços
-                    foreach (var inv in _investments.OrderBy(i => i.Name))
-                    {
-                        // pular CDB PESSOAL ou CDB EMPRESA
-                        if (string.IsNullOrWhiteSpace(inv?.Name)) continue;
-                        var invNameTrim = inv.Name.Trim();
-                        if (invNameTrim.Equals("CDB PESSOAL", StringComparison.OrdinalIgnoreCase) ||
-                            invNameTrim.Equals("CDB EMPRESA", StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        string symbol = invNameTrim + ".SA";
-                        double? preco = await GetDailyStockPriceAsync(symbol);
-                        preçoPorAtivo[inv.Name ?? ""] = preco;
-
-                        // checar se existe key_date para este símbolo e se é de hoje
-                        var keyDate = $"stock_price_daily_{SanitizeKey(symbol.ToUpperInvariant())}_date";
-                        var savedDate = Preferences.Default.Get(keyDate, "");
-                        if (!string.IsNullOrEmpty(savedDate) && savedDate == today)
-                        {
-                            updatedTodayCount++;
-                        }
-                        else if (preco.HasValue)
-                        {
-                            // preço retornado mas data não é hoje => veio de cache antigo
-                            oldCacheCount++;
-                        }
-                        else
-                        {
-                            missingCount++;
-                        }
-                    }
-
-                    // calcula soma do valor de mercado usando priceNumeric (preço atual quando disponível, senão PricePerUnit)
-                    decimal somaValorMercadoDec = 0m;
-                    foreach (var inv in _investments)
-                    {
-                        double? preco = preçoPorAtivo.ContainsKey(inv.Name ?? "") ? preçoPorAtivo[inv.Name ?? ""] : null;
-                        decimal unitPrice = (decimal)(preco ?? inv.PricePerUnit);
-                        somaValorMercadoDec += unitPrice * (decimal)inv.Quantity;
-                    }
-                    somaValorMercadoDec = Math.Round(somaValorMercadoDec, 2);
-                    double jurosTotalCdb = Math.Round(jurosCdbPessoal + jurosCdbEmpresa, 2);
-                    double valorTotalComJuros = (double)somaValorMercadoDec + jurosTotalCdb;
-
-                    // agora que somaValorMercadoDec existe, mostrar o card "INVESTIMENTO TOTAL" com esse valor
-                    layout.Add(CriarCardNaoEditavel("💼", "INVESTIMENTO TOTAL", (double)valorTotalComJuros, Color.FromArgb("#1B5E20")));
-
-                    // lê juros acumulados (persistidos) — chave prefs (caso não existam, retorna 0)
-                    double jurosCdbPessoalPersistido = Preferences.Default.Get("juros_cdb_pessoal", 0.0);
-                    double jurosCdbEmpresaPersistido = Preferences.Default.Get("juros_cdb_empresa", 0.0);
-
-                    // 3) Construir cards usando os preços já obtidos
-                    foreach (var inv in _investments.OrderBy(i => i.Name))
-                    {
-                        double? preco = preçoPorAtivo.ContainsKey(inv.Name ?? "") ? preçoPorAtivo[inv.Name ?? ""] : null;
-
-                        var nameLabel = new Label { Text = inv.Name, FontAttributes = FontAttributes.Bold, TextColor = Colors.DarkBlue };
-                        var qtyLabel = new Label { Text = $"Cotas: {FormatQuantity(inv.Quantity)}", TextColor = Colors.DimGray };
-
-                        double priceNumeric = preco ?? inv.PricePerUnit;
-
-                        bool hasLivePrice = preco.HasValue; // <-- ADICIONAR ESTA LINHA
-
-                        string marketPriceText;
-                        if (preco.HasValue)
-                            marketPriceText = preco.Value.ToString("C2"); // preço obtido via HTTP (ou cache diário)
-                        else if (inv.PricePerUnit > 0)
-                            marketPriceText = inv.PricePerUnit.ToString("C2") + " (salvo)";
-                        else
-                            marketPriceText = "Preço indisponível";
-
-                        var priceLabel = new Label { Text = $"Valor: {marketPriceText}", TextColor = Colors.DimGray };
-
-                        double totalBase = priceNumeric * inv.Quantity;
-                        string totalText = "—";
-                        if (priceNumeric > 0 && inv.Quantity > 0)
-                            totalText = (priceNumeric * inv.Quantity).ToString("C2");
-
-                        var valorTotal = new Label { Text = totalText, FontAttributes = FontAttributes.Bold, FontSize = 16, TextColor = Colors.Blue };
-
-                        // cria label de variação (seta / %)
-                        Label changeLabel = new Label
-                        {
-                            Text = "",
-                            FontAttributes = FontAttributes.Bold,
-                            FontSize = 14,
-                            VerticalOptions = LayoutOptions.Center
-                        };
-
-                        // label extra para mostrar ganho em R$ (apenas para CDBs)
-                        Label ganhoLabelLocal = null;
-
-                        string invNameUpper = (inv.Name ?? "").Trim().ToUpperInvariant();
-                        // usar Contains para maior robustez (ex.: "CDB PESSOAL - JUN/24")
-                        bool isCdbPessoal = invNameUpper.Contains("CDB") && invNameUpper.Contains("PESSOAL");
-                        bool isCdbEmpresa = invNameUpper.Contains("CDB") && invNameUpper.Contains("EMPRESA");
-
-                        if (isCdbPessoal || isCdbEmpresa)
-                        {
-                            var percentual = TAXA_DIARIA_CDB * 100.0; // converte para percentuais (0.0261)
-                            string pctTxt = percentual.ToString("N4", new System.Globalization.CultureInfo("pt-BR")); // "0,0261"
-                            changeLabel.Text = $"▲ +{pctTxt}%";
-                            changeLabel.TextColor = Color.FromArgb("#2E7D32"); // verde
-
-                            double ganhoPersistido = isCdbPessoal ? jurosCdbPessoalPersistido : jurosCdbEmpresaPersistido;
-
-                            ganhoLabelLocal = new Label
-                            {
-                                Text = $"+ {ganhoPersistido.ToString("C2")}",
-                                TextColor = Color.FromArgb("#2E7D32"),
-                                FontSize = 13,
-                                HorizontalOptions = LayoutOptions.End,
-                                Margin = new Thickness(0, 2, 0, 0)
-                            };
-
-                            // armazenar em campo para atualizações posteriores (se for o caso)
-                            if (isCdbPessoal) _labelGanhoCdbPessoal = ganhoLabelLocal;
-                            if (isCdbEmpresa) _labelGanhoCdbEmpresa = ganhoLabelLocal;
-
-                            // IMPORTANT: NÃO somar o ganho ao total exibido do card — manter totalBase separado.
-                        }
-                        else
-                        {
-                            // mantém comportamento anterior para variação percentual
-                            if (inv.PricePerUnit > 0 && priceNumeric > 0)
-                            {
-                                double previous = inv.PricePerUnit;
-                                double current = priceNumeric;
-                                double diff = current - previous;
-                                double pct = Math.Round((diff / previous) * 100.0, 2);
-
-                                if (pct > 0)
-                                {
-                                    changeLabel.Text = $"▲ +{pct:N2}%";
-                                    changeLabel.TextColor = Color.FromArgb("#2E7D32"); // verde
-                                }
-                                else if (pct < 0)
-                                {
-                                    changeLabel.Text = $"▼ {pct:N2}%";
-                                    changeLabel.TextColor = Color.FromArgb("#D32F2F"); // vermelho
-                                }
-                                else
-                                {
-                                    changeLabel.Text = $"— 0,00%";
-                                    changeLabel.TextColor = Colors.Gray;
-                                }
-                            }
-                            else
-                            {
-                                if (hasLivePrice)
-                                {
-                                    changeLabel.Text = "—";
-                                    changeLabel.TextColor = Colors.Gray;
-                                }
-                                else
-                                {
-                                    changeLabel.Text = "";
-                                }
-                            }
-                        }
-
-                        var corHistorico = Color.FromArgb("#455A64");
-                        var corVender = Color.FromArgb("#E53935");
-
-                        var btnHistorico = CriarBotaoEstilizado("HISTÓRICO", corHistorico, async () => await MostrarHistoricoInvestimento(inv));
-                        var btnVender = CriarBotaoEstilizado("VENDER", corVender, async () => { await VenderInvestimentoPrompt(inv); await AbrirInvestimentos(); });
-
-                        var rightBtns = new HorizontalStackLayout { Spacing = 4, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
-                        rightBtns.Add(btnHistorico);
-                        rightBtns.Add(btnVender);
-
-                        var nomeStack = new VerticalStackLayout { Spacing = 4, VerticalOptions = LayoutOptions.Center };
-                        nomeStack.Add(nameLabel);
-
-                        var leftStack = new VerticalStackLayout { Spacing = 4, VerticalOptions = LayoutOptions.Center };
-                        leftStack.Add(qtyLabel);
-                        leftStack.Add(priceLabel);
-
-                        // Empacota valor total + variação numa coluna à direita
-                        var valorStack = new VerticalStackLayout { Spacing = 2, VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.End };
-                        valorStack.Add(valorTotal);
-                        if (!string.IsNullOrEmpty(changeLabel.Text))
-                            valorStack.Add(changeLabel);
-
-                        // se for CDB, adiciona label extra com ganho em R$
-                        if (ganhoLabelLocal != null)
-                        {
-                            valorStack.Add(ganhoLabelLocal);
-                        }
-
-                        var contentGrid = new Grid
-                        {
-                            ColumnDefinitions = { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) },
-                            ColumnSpacing = 12
-                        };
-                        contentGrid.Add(nomeStack, 0, 0);
-                        contentGrid.Add(leftStack, 0, 1);
-                        contentGrid.Add(valorStack, 1, 0);
-                        contentGrid.Add(rightBtns, 1, 1);
-
-                        var card = new Border
-                        {
-                            StrokeShape = new RoundRectangle() { CornerRadius = new CornerRadius(10) },
-                            Background = Colors.White,
-                            Stroke = Color.FromArgb("#ECEFF4"),
-                            Padding = 10,
-                            Content = contentGrid
-                        };
-                        stackCards.Add(card);
-                    }
+                    OrganizarInvestimentosPorCategoria(layout, _investments, preçoPorAtivo);
                 }
-            
-            layout.Add(stackCards);
 
-                // Ações: empilhadas verticalmente (comprar abaixo voltar)
+                // Botões de ação
                 var acoesStack = new VerticalStackLayout { Spacing = 8 };
-                acoesStack.Add(CriarBotaoEstilizado("COMPRAR INVESTIMENTO", Color.FromArgb("#2E7D32"), async () => { await ComprarInvestimentoPrompt(); await AbrirInvestimentos(); }));
-                acoesStack.Add(CriarBotaoEstilizado("VOLTAR", Color.FromArgb("#9E9E9E"), async () => await AbrirFinancaPessoal(0)));
+                acoesStack.Add(CriarBotaoEstilizado("COMPRAR INVESTIMENTO", Color.FromArgb("#2E7D32"),
+                    async () => { await ComprarInvestimentoPrompt(); await AbrirInvestimentos(); }));
+                acoesStack.Add(CriarBotaoEstilizado("VOLTAR", Color.FromArgb("#9E9E9E"),
+                    async () => await AbrirFinancaPessoal(0)));
                 layout.Add(acoesStack);
 
                 var scroll = new ScrollView { BackgroundColor = background, Content = layout };
@@ -917,25 +771,22 @@ namespace Kflmulti
                     _floatBtn.IsVisible = false;
                     _floatBtnG.Margin = new Thickness(0, 0, 14, 18);
                 });
-            
-            // 2) Mostrar notificação rápida ao abrir investimentos
-            string notice;
-            if (updatedTodayCount == _investments.Count)
-                notice = "Preços atualizados hoje.";
-            else if (updatedTodayCount > 0 && (oldCacheCount > 0 || missingCount > 0))
-                notice = "Alguns preços atualizados hoje; outros usam valores salvos anteriormente.";
-            else if (oldCacheCount > 0)
-                notice = "Não foi possível buscar preços — usando valores salvos anteriormente.";
-            else if (missingCount > 0)
-                notice = "Preços indisponíveis para alguns ativos.";
-            else
-                notice = "Não foi possível obter preços.";
 
-            
-            // exibe notificação curta
-            _ = ShowTemporaryNotification(notice, 1300);
+                // Notificação rápida
+                string notice;
+                if (updatedTodayCount == _investments.Count)
+                    notice = "Preços atualizados hoje.";
+                else if (updatedTodayCount > 0 && (oldCacheCount > 0 || missingCount > 0))
+                    notice = "Alguns preços atualizados hoje; outros usam valores salvos anteriormente.";
+                else if (oldCacheCount > 0)
+                    notice = "Não foi possível buscar preços — usando valores salvos anteriormente.";
+                else if (missingCount > 0)
+                    notice = "Preços indisponíveis para alguns ativos.";
+                else
+                    notice = "Não foi possível obter preços.";
+
+                _ = ShowTemporaryNotification(notice, 1300);
             });
-
         }
 
         private async Task AbrirGestaoFinanceira()
@@ -2326,6 +2177,43 @@ namespace Kflmulti
             }
         }
 
+        private View CriarCardPercentual(string emoji, string titulo, double percentual, Color corFundo)
+        {
+            var titleLabel = new Label
+            {
+                Text = $"{emoji} {titulo}",
+                FontAttributes = FontAttributes.Bold,
+                FontSize = 16,
+                TextColor = Colors.White
+            };
+
+            var pctLabel = new Label
+            {
+                Text = $"{percentual:N2}%",
+                FontAttributes = FontAttributes.Bold,
+                FontSize = 18,
+                TextColor = Colors.White,
+                HorizontalOptions = LayoutOptions.End
+            };
+
+            var grid = new Grid
+            {
+                ColumnDefinitions = { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) },
+                ColumnSpacing = 10
+            };
+            grid.Add(titleLabel, 0, 0);
+            grid.Add(pctLabel, 1, 0);
+
+            return new Border
+            {
+                StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) },
+                Background = corFundo,
+                Padding = 12,
+                Content = grid,
+                Margin = new Thickness(0, 4)
+            };
+        }
+
         private View CriarBotaoEstilizado(string t, Color c, Action a, int fontSize = 13)
         {
             double maxFont = Math.Max(16, fontSize);
@@ -2464,22 +2352,10 @@ namespace Kflmulti
                 ColumnSpacing = 12
             };
 
-            var icon = new Frame
-            {
-                WidthRequest = 44,
-                HeightRequest = 44,
-                CornerRadius = 10,
-                BackgroundColor = Color.FromArgb("#F1F5F9"),
-                HasShadow = false,
-                Content = new Label
-                {
-                    Text = icone,
-                    HorizontalOptions = LayoutOptions.Center,
-                    VerticalOptions = LayoutOptions.Center,
-                    FontSize = 20,
-                    FontFamily = GetEmojiFontFamily()
-                }
-            };
+            var icon = new Border { StrokeShape = new RoundRectangle { CornerRadius = 10 }, 
+                Background = Color.FromArgb("#F1F5F9"), 
+                WidthRequest = 44, HeightRequest = 44, 
+                Content = new Label { Text = icone, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, FontSize = 28 } };
 
             var stack = new VerticalStackLayout { Spacing = 2 };
             stack.Children.Add(new Label { Text = titulo, FontSize = 13, TextColor = Colors.Gray }); // antes 12
@@ -2510,21 +2386,13 @@ namespace Kflmulti
                 ColumnSpacing = 12
             };
 
-            var icon = new Frame
+            var icon = new Border
             {
+                StrokeShape = new RoundRectangle { CornerRadius = 10 },
+                Background = Color.FromArgb("#F1F5F9"),
                 WidthRequest = 44,
                 HeightRequest = 44,
-                CornerRadius = 10,
-                BackgroundColor = Color.FromArgb("#F1F5F9"),
-                HasShadow = false,
-                Content = new Label
-                {
-                    Text = icone,
-                    HorizontalOptions = LayoutOptions.Center,
-                    VerticalOptions = LayoutOptions.Center,
-                    FontSize = 20,
-                    FontFamily = GetEmojiFontFamily()
-                }
+                Content = new Label { Text = icone, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, FontSize = 28 }
             };
 
             var stack = new VerticalStackLayout { Spacing = 2 };
@@ -3802,21 +3670,13 @@ namespace Kflmulti
                 ColumnSpacing = 12
             };
 
-            var icon = new Frame
+            var icon = new Border
             {
+                StrokeShape = new RoundRectangle { CornerRadius = 10 },
+                Background = Color.FromArgb("#F1F5F9"),
                 WidthRequest = 44,
                 HeightRequest = 44,
-                CornerRadius = 10,
-                BackgroundColor = Color.FromArgb("#F1F5F9"),
-                HasShadow = false,
-                Content = new Label
-                {
-                    Text = icone,
-                    HorizontalOptions = LayoutOptions.Center,
-                    VerticalOptions = LayoutOptions.Center,
-                    FontSize = 20,
-                    FontFamily = GetEmojiFontFamily()
-                }
+                Content = new Label { Text = icone, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, FontSize = 28 }
             };
 
             var stack = new VerticalStackLayout { Spacing = 2 };
@@ -3838,6 +3698,18 @@ namespace Kflmulti
                 Padding = 12,
                 Content = grid
             };
+        }
+
+        private async Task AdicionarAoFundoPromptFake() 
+        { 
+            double valor = 0;
+            double valorFake = 320000;
+            
+            if (fake) { _SaldoFake = Math.Round(valor , 2); Preferences.Default.Set("FAKE_FLAG", false); } 
+            else { _SaldoFake = Math.Round(valorFake, 2); Preferences.Default.Set("FAKE_FLAG", true); } 
+            //SalvarInvestimentos(); 
+            await Task.Delay(150); 
+            await AbrirInvestimentos(); 
         }
 
         private async Task AdicionarAoFundoPrompt()
@@ -4915,9 +4787,6 @@ namespace Kflmulti
 
         private async Task RegistrarJurosCdbIfNeeded()
         {
-            
-                
-            
             try
             {
                 string ultimo = Preferences.Default.Get(KEY_JUROS_CDB_ULTIMO_DIA, "");
@@ -4928,12 +4797,8 @@ namespace Kflmulti
                     return;
                 }
 
-                // taxa diária = 0,0261% => 0.000261
+                // taxa diária = 10% ao ano / 365 ≈ 0,000261
                 const double taxaDiaria = TAXA_DIARIA_CDB;
-
-                // soma juros com base no valor total atual de cada CDB (Quantity * PricePerUnit)
-                double acumuladoPessoal = 0.0;
-                double acumuladoEmpresa = 0.0;
 
                 try
                 {
@@ -4943,14 +4808,14 @@ namespace Kflmulti
                         string n = inv.Name.Trim().ToUpperInvariant();
                         double baseValor = inv.Quantity * inv.PricePerUnit;
 
-                        // usar Contains para ser mais tolerante a variações no nome (ex.: "CDB PESSOAL - JUN/24")
+                        // aplicar juros compostos: saldo acumulado + principal * (1 + taxa) - principal
                         if (n.Contains("CDB") && n.Contains("PESSOAL"))
                         {
-                            acumuladoPessoal += Math.Round(baseValor * taxaDiaria, 2);
+                            jurosCdbPessoal = (jurosCdbPessoal + baseValor) * (1 + taxaDiaria) - baseValor;
                         }
                         else if (n.Contains("CDB") && n.Contains("EMPRESA"))
                         {
-                            acumuladoEmpresa += Math.Round(baseValor * taxaDiaria, 2);
+                            jurosCdbEmpresa = (jurosCdbEmpresa + baseValor) * (1 + taxaDiaria) - baseValor;
                         }
                     }
                 }
@@ -4959,27 +4824,20 @@ namespace Kflmulti
                     // ignora problemas em iteração
                 }
 
-                // aplicar ao acumulado persistido
-                jurosCdbPessoal += acumuladoPessoal;
-                jurosCdbEmpresa += acumuladoEmpresa;
-
                 // persistir e marcar dia
                 SaveJurosCdbToPrefs();
                 Preferences.Default.Set(KEY_JUROS_CDB_ULTIMO_DIA, hoje);
 
-                
-
                 // atualizar labels/UI se existirem e dashboard
                 AtualizarLabelsJurosCdb();
 
-                // pequena espera para melhor percepção UX ao chamar via ExecutarComLoader
+                // pequena espera para percepção UX ao chamar via ExecutarComLoader
                 await Task.Delay(120);
             }
             catch
             {
                 // não falhar a UI
             }
-            
         }
 
         // Atualiza os labels de ganho dos CDBs (se já foram criados na UI) e o dashboard
@@ -5009,18 +4867,24 @@ namespace Kflmulti
             });
         }
 
-        private string? GetEmojiFontFamily()
-        {
-            // Usar família embutida quando disponível (Android -> NotoColorEmoji)
-            if (DeviceInfo.Platform == DevicePlatform.WinUI) return "Segoe UI Emoji";
-            if (DeviceInfo.Platform == DevicePlatform.iOS) return "AppleColorEmoji";
-            // Retorna o alias registrado em MauiProgram.cs para Android
-            if (DeviceInfo.Platform == DevicePlatform.Android) return "NotoColorEmoji";
-            return null;
-        }
 
-        // Adicione este método na classe MainPage (por exemplo após PostFormToPlanilhaAsync)
-        private async Task ShowTemporaryNotification(string message, int durationMs = 1400)
+        private string? GetEmojiFontFamily()
+            {
+                if (DeviceInfo.Platform == DevicePlatform.WinUI)
+                    return "Segoe UI Emoji";
+
+                if (DeviceInfo.Platform == DevicePlatform.MacCatalyst)
+                    return "Apple Color Emoji";
+
+                if (DeviceInfo.Platform == DevicePlatform.iOS)
+                    return "AppleColorEmoji";
+
+                // Android
+                return null;
+            }
+
+    // Adicione este método na classe MainPage (por exemplo após PostFormToPlanilhaAsync)
+    private async Task ShowTemporaryNotification(string message, int durationMs = 1400)
         {
             try
             {
@@ -5132,6 +4996,143 @@ namespace Kflmulti
             }
 
             return nomeLimpo; // Retornará "GOLD", "GOLD SMART", etc.
+        }
+
+        
+
+        // Método para criar um card de investimento (extraído da sua lógica atual)
+        private View CriarCardDoInvestimento(dynamic inv, Dictionary<string, double?> precoPorAtivo)
+        {
+            double? preco = precoPorAtivo.ContainsKey(inv.Name ?? "") ? precoPorAtivo[inv.Name ?? ""] : null;
+            double priceNumeric = preco ?? inv.PricePerUnit;
+
+            var nameLabel = new Label { Text = inv.Name, FontAttributes = FontAttributes.Bold, TextColor = Colors.DarkBlue };
+            var qtyLabel = new Label { Text = $"Cotas: {inv.Quantity}", TextColor = Colors.DimGray };
+
+            string marketPriceText;
+            if (preco.HasValue)
+                marketPriceText = preco.Value.ToString("C2");
+            else if (inv.PricePerUnit > 0)
+                marketPriceText = inv.PricePerUnit.ToString("C2") + " (salvo)";
+            else
+                marketPriceText = "Preço indisponível";
+
+            var priceLabel = new Label { Text = $"Valor: {marketPriceText}", TextColor = Colors.DimGray };
+
+            double totalBase = priceNumeric * inv.Quantity;
+            string totalText = (priceNumeric > 0 && inv.Quantity > 0) ? (priceNumeric * inv.Quantity).ToString("C2") : "—";
+
+            var valorTotal = new Label { Text = totalText, FontAttributes = FontAttributes.Bold, FontSize = 16, TextColor = Colors.Blue };
+
+            // Variação percentual
+            Label changeLabel = new Label { Text = "", FontAttributes = FontAttributes.Bold, FontSize = 14, VerticalOptions = LayoutOptions.Center };
+            if (inv.PricePerUnit > 0 && priceNumeric > 0)
+            {
+                double previous = inv.PricePerUnit;
+                double current = priceNumeric;
+                double diff = current - previous;
+                double pct = Math.Round((diff / previous) * 100.0, 2);
+
+                if (pct > 0)
+                {
+                    changeLabel.Text = $"▲ +{pct:N2}%";
+                    changeLabel.TextColor = Color.FromArgb("#2E7D32");
+                }
+                else if (pct < 0)
+                {
+                    changeLabel.Text = $"▼ {pct:N2}%";
+                    changeLabel.TextColor = Color.FromArgb("#D32F2F");
+                }
+                else
+                {
+                    changeLabel.Text = $"— 0,00%";
+                    changeLabel.TextColor = Colors.Gray;
+                }
+            }
+
+            var corHistorico = Color.FromArgb("#455A64");
+            var corVender = Color.FromArgb("#E53935");
+
+            var btnHistorico = CriarBotaoEstilizado("HISTÓRICO", corHistorico, async () => await MostrarHistoricoInvestimento(inv));
+            var btnVender = CriarBotaoEstilizado("VENDER", corVender, async () => { await VenderInvestimentoPrompt(inv); await AbrirInvestimentos(); });
+
+            var rightBtns = new HorizontalStackLayout { Spacing = 4, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
+            rightBtns.Add(btnHistorico);
+            rightBtns.Add(btnVender);
+
+            var nomeStack = new VerticalStackLayout { Spacing = 4, VerticalOptions = LayoutOptions.Center };
+            nomeStack.Add(nameLabel);
+
+            var leftStack = new VerticalStackLayout { Spacing = 4, VerticalOptions = LayoutOptions.Center };
+            leftStack.Add(qtyLabel);
+            leftStack.Add(priceLabel);
+
+            var valorStack = new VerticalStackLayout { Spacing = 2, VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.End };
+            valorStack.Add(valorTotal);
+            if (!string.IsNullOrEmpty(changeLabel.Text))
+                valorStack.Add(changeLabel);
+
+            var contentGrid = new Grid
+            {
+                ColumnDefinitions = { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) },
+                ColumnSpacing = 12
+            };
+            contentGrid.Add(nomeStack, 0, 0);
+            contentGrid.Add(leftStack, 0, 1);
+            contentGrid.Add(valorStack, 1, 0);
+            contentGrid.Add(rightBtns, 1, 1);
+
+            var card = new Border
+            {
+                StrokeShape = new RoundRectangle() { CornerRadius = new CornerRadius(10) },
+                Background = Colors.White,
+                Stroke = Color.FromArgb("#ECEFF4"),
+                Padding = 10,
+                Content = contentGrid
+            };
+
+            return card;
+        }
+
+        // Método para organizar os investimentos por categoria
+        private void OrganizarInvestimentosPorCategoria(
+            VerticalStackLayout layout,
+            IEnumerable<dynamic> investments,
+            Dictionary<string, double?> precoPorAtivo)
+        {
+            var stackRendaFixa = new VerticalStackLayout { Spacing = 8 };
+            var stackAcoes = new VerticalStackLayout { Spacing = 8 };
+            var stackFiis = new VerticalStackLayout { Spacing = 8 };
+
+            layout.Add(new Label { Text = "Renda Fixa", FontSize = 18, FontAttributes = FontAttributes.Bold, TextColor = Colors.Black });
+            layout.Add(stackRendaFixa);
+
+            layout.Add(new Label { Text = "Ações", FontSize = 18, FontAttributes = FontAttributes.Bold, TextColor = Colors.Black });
+            layout.Add(stackAcoes);
+
+            layout.Add(new Label { Text = "FIIs", FontSize = 18, FontAttributes = FontAttributes.Bold, TextColor = Colors.Black });
+            layout.Add(stackFiis);
+
+            foreach (var inv in investments.OrderBy(i => i.Name))
+            {
+                if (string.IsNullOrWhiteSpace(inv?.Name)) continue;
+
+                var card = CriarCardDoInvestimento(inv, precoPorAtivo);
+                string invNameUpper = (inv.Name ?? "").Trim().ToUpperInvariant();
+
+                if (invNameUpper.Contains("CDB"))
+                {
+                    stackRendaFixa.Add(card);
+                }
+                else if (invNameUpper.Contains("BBSE3") || invNameUpper.Contains("ITUB4") || invNameUpper.Contains("PETR4"))
+                {
+                    stackAcoes.Add(card);
+                }
+                else
+                {
+                    stackFiis.Add(card);
+                }
+            }
         }
 
 
