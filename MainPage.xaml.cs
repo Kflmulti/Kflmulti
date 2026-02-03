@@ -682,7 +682,7 @@ namespace Kflmulti
         #endregion
 
         #region Tela Operacional
-        //#endregion
+        
         private void AbrirTelaOperacional()
         {
             var background = Color.FromArgb("#F7FAFE");
@@ -954,20 +954,23 @@ namespace Kflmulti
                 string escolha = await DisplayActionSheet("Relatório — escolha ação", "Cancelar", null, "Visualizar", "Enviar");
                 if (escolha == "Visualizar")
                 {
-                    await DisplayAlert("Relatório", msg, "OK");
+                    await DisplayAlert("Relatório", msg, "OK");                   
                     return;
                 }
                 if (escolha == "Enviar")
                 {
                     try
                     {
+                        await EnviarListaNfParaPlanilha();
                         string url = $"https://api.whatsapp.com/send?text={Uri.EscapeDataString(msg)}";
                         await Launcher.Default.OpenAsync(new Uri(url));
+                        
                     }
                     catch
                     {
                         // fallback para Share se o launcher falhar
                         await Share.Default.RequestAsync(new ShareTextRequest { Title = "Relatório", Text = msg });
+                        
                     }
 
                     // somente após enviar, limpar listas e persistências
@@ -4113,6 +4116,7 @@ namespace Kflmulti
         }
         public async Task EnviarDadosRenovacao(string nome, string planoC, bool pend, DateTime inicio, DateTime? datapg, DateTime fim, string v)
         {
+            
             var corpo = new Dictionary<string, string>
             {
                 { "cliente", nome },
@@ -4192,33 +4196,7 @@ namespace Kflmulti
                 catch { /* não falhar a UI */ }
                 return false;
             }
-        }
-        private async Task<bool> PostJsonOrQueueAsync(string url, object body)
-        {
-            string json = JsonConvert.SerializeObject(body);
-            try
-            {
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(15);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-                var res = await client.PostAsync(url, content);
-                if (res.IsSuccessStatusCode) return true;
-
-                // servidor respondeu não-success -> enfileirar para tentar depois
-                _pendingHttpCommands.Add(new PendingHttpCommand { Url = url, Method = "POST", JsonBody = json, Attempts = 1 });
-                await SalvarPendingCommandsToPrefsAsync();
-                AtualizarBadgePendentes();
-                return false;
-            }
-            catch
-            {
-                // falha de rede/exceção -> enfileirar
-                _pendingHttpCommands.Add(new PendingHttpCommand { Url = url, Method = "POST", JsonBody = json, Attempts = 1 });
-                await SalvarPendingCommandsToPrefsAsync();
-                AtualizarBadgePendentes();
-                return false;
-            }
-        }
+        }       
         private async Task TryEnviarComandosPendentesAsync()
         {
             // mostra loader enquanto tenta enviar pendentes
@@ -4310,20 +4288,20 @@ namespace Kflmulti
         public async Task LimparPendenciaNaPlanilha(string nome)
         {
             var dados = new { cliente = nome, datapg = "", pg = "" };
-            await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dados);
+            await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dados, operation: "limpar_pendencia", localRef: nome);
         }
         private async Task<bool> PostJsonOrQueueAsync(string url, object body, string? operation = null, string? localRef = null)
         {
             string json = JsonConvert.SerializeObject(body);
             try
             {
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(15);
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
                 var res = await client.PostAsync(url, content);
+
                 if (res.IsSuccessStatusCode) return true;
 
-                // servidor respondeu não-success -> enfileirar apenas o HTTP (com metadata opcional)
+                // Se falhar, enfileira SOMENTE o HTTP externo
                 _pendingHttpCommands.Add(new PendingHttpCommand
                 {
                     Url = url,
@@ -4339,7 +4317,7 @@ namespace Kflmulti
             }
             catch
             {
-                // falha de rede/exceção -> enfileirar apenas o HTTP (com metadata opcional)
+                // Falha de rede → enfileira SOMENTE o HTTP externo
                 _pendingHttpCommands.Add(new PendingHttpCommand
                 {
                     Url = url,
@@ -4353,7 +4331,7 @@ namespace Kflmulti
                 AtualizarBadgePendentes();
                 return false;
             }
-        }
+        }      
         private void CarregarPendingCommandsFromPrefs()
         {
             try
@@ -4382,7 +4360,43 @@ namespace Kflmulti
                 // não falhar a UI em caso de erro de persistência
             }
         }
+        private async Task EnviarListaNfParaPlanilha()
+        {
+            if (_listaNfLocal == null || _listaNfLocal.Count == 0)
+            {
+                await DisplayAlert("Aviso", "Não há NF para enviar.", "OK");
+                return;
+            }
 
+            var clientesParaEnviar = _listaNfLocal.Select(n => n.Cliente).ToList();
+            var dadosParaEnviar = new { clientes = clientesParaEnviar };
+
+            try
+            {
+                // Faz o POST para o PHP
+                var enviado = await PostJsonOrQueueAsync(
+                    "https://kflmulti.com/AndroidStudio/NfPlanilha.php",
+                    dadosParaEnviar,
+                    operation: "inserir_nf",
+                    localRef: "lista_nf"
+                );
+
+                if (!enviado)
+                {
+                    await DisplayAlert("Erro", "Falha ao enviar lista de NF para a planilha.", "OK");
+                }
+                else
+                {
+                    //await DisplayAlert("Sucesso", $"{clientesParaEnviar.Count} clientes enviados para a planilha.", "OK");
+                }
+            }
+            catch (Exception ex)
+            {
+                // Mostra o erro detalhado
+                await DisplayAlert("Erro", $"Ocorreu um erro: {ex.Message}", "OK");
+            }
+        }
+        
         #endregion
 
         #region Relatórios e Fechamentos mensais
@@ -5044,6 +5058,14 @@ namespace Kflmulti
         }
 
         #endregion
+
+
+
+
+
+        
+
+
 
 
     }
