@@ -19,6 +19,12 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using static System.Runtime.InteropServices.JavaScript.JSType;
+using IOPath = System.IO.Path;
+using PdfSharpCore.Drawing;
+using PdfSharpCore.Pdf;
+using System.IO;
+
+
 
 
 namespace Kflmulti
@@ -119,8 +125,6 @@ namespace Kflmulti
             "Plano MEGA - R$ 300,00", "Combo MEGA SMART - R$ 600,00", "Combo MEGA ADVANCED - R$ 1.200,00",
             "Plano PLUS - R$ 600,00", "Combo PLUS SMART - R$ 1.200,00", "Combo PLUS ADVANCED - R$ 2.400,00"
         };
-
-        
 
         private Frame _floatBtn = null!;
         private Frame _floatBtnG = null!;
@@ -961,10 +965,31 @@ namespace Kflmulti
                 {
                     try
                     {
-                        await EnviarListaNfParaPlanilha();
-                        string url = $"https://api.whatsapp.com/send?text={Uri.EscapeDataString(msg)}";
-                        await Launcher.Default.OpenAsync(new Uri(url));
-                        
+                       bool enviado = await EnviarListaNfParaPlanilha();
+
+                        if (enviado) // só segue se deu certo
+                        {
+                            string url = $"https://api.whatsapp.com/send?text={Uri.EscapeDataString(msg)}";
+                            await Launcher.Default.OpenAsync(new Uri(url));
+                            LimparListasEPersistir();
+                        }
+                        else
+                        {
+                            bool enviarMesmoAssim = await DisplayAlert("Erro", "Não foi possível enviar as NFs. Deseja enviar o relatório para o WhatsApp mesmo assim?", "Sim", "Não"); 
+                            if (enviarMesmoAssim)
+                            {
+                                string url = $"https://api.whatsapp.com/send?text={Uri.EscapeDataString(msg)}";
+                                await Launcher.Default.OpenAsync(new Uri(url));
+                                LimparListasEPersistir();
+                            }
+                            else
+                            {
+                                return;
+                            }
+
+                                
+                        }
+                                                                       
                     }
                     catch
                     {
@@ -972,26 +997,6 @@ namespace Kflmulti
                         await Share.Default.RequestAsync(new ShareTextRequest { Title = "Relatório", Text = msg });
                         
                     }
-
-                    // somente após enviar, limpar listas e persistências
-                    _listaNfLocal.Clear();
-                    _listaRenovadosHoje.Clear();
-                    _listaPausadosHoje.Clear();
-                    _listaNovosHoje.Clear();
-                    _listaRetornadosHoje.Clear();
-                    _listaPendentesPagos.Clear();
-                    _pendingHttpCommands.Clear();
-
-
-                    SalvarPausadosNoDispositivo();
-                    SalvarRenovadosNoDispositivo();
-                    SalvarNovosNoDispositivo();
-                    SalvarRetornadosNoDispositivo();
-                    SalvarPendentesPagosNoDispositivo();
-                    await SalvarPendingCommandsToPrefsAsync();
-
-
-
 
                     try { Preferences.Default.Remove("lista_nf_salva"); } catch { }
 
@@ -1390,6 +1395,7 @@ namespace Kflmulti
                         };
                         _listaNfLocal.Add(nf);
                         Preferences.Default.Set("lista_nf_salva", JsonConvert.SerializeObject(_listaNfLocal));
+                        AdicionarNfAoMes(nf);
                         AddToTotalNfMes(ParseValor(valorFinal));
 
                         // acumula custo de anúncios
@@ -1520,14 +1526,17 @@ namespace Kflmulti
 
                                 if (!existe)
                                 {
-                                    _listaNfLocal.Add(new NfModel
+                                    var nf = new NfModel
                                     {
                                         Data = DateTime.Now.ToString("dd/MM/yyyy"),
                                         Cliente = c.Cliente,
                                         Valor = ValorOuPlano(valorAj, c.Plano),
                                         Plano = c.Plano,
                                         Dias = ObterDiasPorPlano(c.Plano)
-                                    });
+                                    };
+                                    
+                                    _listaNfLocal.Add(nf);
+                                    AdicionarNfAoMes(nf);
                                     // marca como pendente pago para aparecer no relatório
                                     AddPendentePago(c.Cliente);
                                     Preferences.Default.Set("lista_nf_salva", JsonConvert.SerializeObject(_listaNfLocal));
@@ -1582,6 +1591,11 @@ namespace Kflmulti
         }
         private async Task AbrirEditarCliente(ClientesHoje c)
         {
+            
+            
+            string planoLimpo = LimparNomePlano(c.Plano); 
+
+            var p = c.Plano ?? "";
             // guarda nome original (ajuda a localizar registro se nome for alterado)
             string originalName = c.Cliente ?? "";
 
@@ -1602,7 +1616,7 @@ namespace Kflmulti
             layout.Add(new Label { Text = "EDITAR CADASTRO", FontSize = 25, FontAttributes = FontAttributes.Bold, TextColor = Colors.Black, HorizontalOptions = LayoutOptions.Center });
 
             var entryNome = new Entry { Text = c.Cliente, Placeholder = "Nome", TextColor = Colors.Black };
-            var entryPlano = new Entry { Text = c.Plano, Placeholder = "Plano", TextColor = Colors.Black };
+            var entryPlano = new Entry { Text = planoLimpo, Placeholder = "Plano", TextColor = Colors.Black };
             var entryInicio = new Entry { Text = c.Inicio, Placeholder = "Início (dd/MM/yyyy)", TextColor = Colors.Black };
             var entryFim = new Entry { Text = c.Fim, Placeholder = "Fim (dd/MM/yyyy)", TextColor = Colors.Black };
             var entrySituacao = new Entry { Text = c.Situacao, Placeholder = "Situação", TextColor = Colors.Black };
@@ -1669,7 +1683,7 @@ namespace Kflmulti
                 {
 
                     // usa o helper central que faz POST form-url-encoded e enfileira em caso de falha
-                    bool enviado = await PostFormToPlanilhaAsync(url, corpo, operation: "edit", localRef: originalName, showAlert: true);
+                    enviado = await PostFormToPlanilhaAsync(url, corpo, operation: "edit", localRef: originalName, showAlert: true);
 
                     // pequena espera para melhorar percepção da animação (opcional)
                     await Task.Delay(120);
@@ -1736,144 +1750,7 @@ namespace Kflmulti
             var json = JsonConvert.SerializeObject(_listaCompletaServidor);
             Preferences.Default.Set("backup_vistos_hoje", json);
             Preferences.Default.Set("data_vistos", DateTime.Now.ToShortDateString());
-        }
-        private async Task CarregarDadosServidor()
-        {
-            try
-            {
-                await TryEnviarComandosPendentesAsync();
-            }
-            catch
-            {
-                // não bloquear fluxo se falhar
-            }
-            // 1) Carrega cache local (se existir) e atualiza a UI imediatamente
-            try
-            {
-                var jsonCache = Preferences.Default.Get("lista_clientes_cache", "");
-                if (!string.IsNullOrEmpty(jsonCache))
-                {
-                    try
-                    {
-                        _listaCompletaServidor = JsonConvert.DeserializeObject<List<ClientesHoje>>(jsonCache) ?? new List<ClientesHoje>();
-                        ProcessarListas();
-                        MainThread.BeginInvokeOnMainThread(() =>
-                        {
-                            _modoAtual = "ATIVOS";
-                            _searchEntry.Text = string.Empty;
-                            ExecutarBuscaReal();
-                        });
-                    }
-                    catch
-                    {
-                        // Se cache corrompido, ignora e segue para tentativa HTTP
-                        _listaCompletaServidor = new List<ClientesHoje>();
-                    }
-                }
-            }
-            catch
-            {
-                // não falhar se Preferences der problema
-            }
-
-            // 2) Tenta atualizar via HTTP; se falhar, mantém o que já foi carregado do cache
-            try
-            {
-                MainThread.BeginInvokeOnMainThread(() => { _loader.IsVisible = true; _loader.IsRunning = true; _listView.Opacity = 0.3; });
-
-                using var client = new HttpClient();
-                client.Timeout = TimeSpan.FromSeconds(15);
-
-                var res = await client.GetStringAsync("https://kflmulti.com/AndroidStudio/BuscaClientes.php");
-
-                if (res.Contains("[")) res = res.Substring(res.IndexOf("["));
-
-                var listaServidor = JsonConvert.DeserializeObject<List<ClientesHoje>>(res) ?? new List<ClientesHoje>();
-
-                // --- LÓGICA DE RESET DOS VISTOS ---
-                string dataUltimoContato = Preferences.Default.Get("data_vistos", "");
-                string hoje = DateTime.Now.ToShortDateString();
-
-                if (dataUltimoContato != hoje)
-                {
-                    foreach (var cliente in listaServidor) cliente.ContatoFeitoHoje = false;
-                    Preferences.Default.Remove("backup_vistos_hoje");
-                    Preferences.Default.Set("data_vistos", hoje);
-                }
-                else
-                {
-                    var jsonVistos = Preferences.Default.Get("backup_vistos_hoje", "");
-                    if (!string.IsNullOrEmpty(jsonVistos))
-                    {
-                        var listaComVistos = JsonConvert.DeserializeObject<List<ClientesHoje>>(jsonVistos);
-                        foreach (var c in listaServidor)
-                        {
-                            var correspondente = listaComVistos.FirstOrDefault(x => x.Cliente == c.Cliente);
-                            if (correspondente != null)
-                                c.ContatoFeitoHoje = correspondente.ContatoFeitoHoje;
-                        }
-                    }
-                }
-
-                // Substitui lista em memória e persiste cache local
-
-                _listaCompletaServidor = listaServidor;
-                try
-                {
-                    await TryEnviarComandosPendentesAsync();
-                }
-                catch
-                {
-                    // ignora
-                }
-
-                try
-                {
-                    // salva o cache antigo em 'lista_clientes_cache_prev' antes de sobrescrever
-                    var oldCache = Preferences.Default.Get("lista_clientes_cache", "");
-                    if (!string.IsNullOrEmpty(oldCache))
-                    {
-                        Preferences.Default.Set("lista_clientes_cache_prev", oldCache);
-                    }
-
-                    Preferences.Default.Set("lista_clientes_cache", JsonConvert.SerializeObject(_listaCompletaServidor));
-                }
-                catch
-                {
-                    // se persistência falhar, não quebra o fluxo
-                }
-
-                // Regras de meta/contagem e listas dependentes
-                DateTime ultimaAtualizacao = Preferences.Default.Get("data_ultima_meta", DateTime.MinValue);
-                if (DateTime.Now.Date > ultimaAtualizacao.Date)
-                {
-                    Preferences.Default.Set("total_clientes_ontem", _listaCompletaServidor.Count);
-                    Preferences.Default.Set("data_ultima_meta", DateTime.Now.Date);
-                }
-
-                ProcessarListas();
-
-
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    _modoAtual = "ATIVOS";
-                    _searchEntry.Text = string.Empty;
-                    ExecutarBuscaReal();
-                });
-            }
-            catch (Exception)
-            {
-                // Aviso simples: não interrompe fluxo, continua com cache já carregado (se houver)
-                MainThread.BeginInvokeOnMainThread(async () =>
-                {
-                    await DisplayAlert("Aviso", "Não foi possível atualizar. Usando última lista disponível (offline).", "OK");
-                });
-            }
-            finally
-            {
-                MainThread.BeginInvokeOnMainThread(() => { _loader.IsRunning = false; _loader.IsVisible = false; _listView.Opacity = 1.0; });
-            }
-        }
+        }        
         private void SalvarPausadosNoDispositivo()
         {
             try { Preferences.Default.Set(KEY_PAUSADOS_HOJE, JsonConvert.SerializeObject(_listaPausadosHoje)); }
@@ -4088,60 +3965,260 @@ namespace Kflmulti
             public string? Operation { get; set; } = null;   // ex: "renovacao", "limpar_pendencia"
             public string? LocalRef { get; set; } = null;    // ex: nome do cliente ou id da NF
         }
+        private async Task CarregarDadosServidor()
+        {
+            try
+            {
+                await TryEnviarComandosPendentesAsync();
+            }
+            catch
+            {
+                // não bloquear fluxo se falhar
+            }
+            // 1) Carrega cache local (se existir) e atualiza a UI imediatamente
+            try
+            {
+                var jsonCache = Preferences.Default.Get("lista_clientes_cache", "");
+                if (!string.IsNullOrEmpty(jsonCache))
+                {
+                    try
+                    {
+                        _listaCompletaServidor = JsonConvert.DeserializeObject<List<ClientesHoje>>(jsonCache) ?? new List<ClientesHoje>();
+                        ProcessarListas();
+                        MainThread.BeginInvokeOnMainThread(() =>
+                        {
+                            _modoAtual = "ATIVOS";
+                            _searchEntry.Text = string.Empty;
+                            ExecutarBuscaReal();
+                        });
+                    }
+                    catch
+                    {
+                        // Se cache corrompido, ignora e segue para tentativa HTTP
+                        _listaCompletaServidor = new List<ClientesHoje>();
+                    }
+                }
+            }
+            catch
+            {
+                // não falhar se Preferences der problema
+            }
+
+            int tentativas = 0; 
+            bool sucesso = false; 
+            
+           while (tentativas < 3 && !sucesso)
+           {
+                // 2) Tenta atualizar via HTTP; se falhar, mantém o que já foi carregado do cache
+                try
+                {
+                    tentativas++;
+                    MainThread.BeginInvokeOnMainThread(() => { _loader.IsVisible = true; _loader.IsRunning = true; _listView.Opacity = 0.3; });
+
+                using var client = new HttpClient();
+                client.Timeout = TimeSpan.FromSeconds(15);
+
+                var res = await client.GetStringAsync("https://kflmulti.com/AndroidStudio/BuscaClientes.php");
+
+                if (res.Contains("[")) res = res.Substring(res.IndexOf("["));
+
+                var listaServidor = JsonConvert.DeserializeObject<List<ClientesHoje>>(res) ?? new List<ClientesHoje>();
+
+                // --- LÓGICA DE RESET DOS VISTOS ---
+                string dataUltimoContato = Preferences.Default.Get("data_vistos", "");
+                string hoje = DateTime.Now.ToShortDateString();
+
+                if (dataUltimoContato != hoje)
+                {
+                    foreach (var cliente in listaServidor) cliente.ContatoFeitoHoje = false;
+                    Preferences.Default.Remove("backup_vistos_hoje");
+                    Preferences.Default.Set("data_vistos", hoje);
+                }
+                else
+                {
+                    var jsonVistos = Preferences.Default.Get("backup_vistos_hoje", "");
+                    if (!string.IsNullOrEmpty(jsonVistos))
+                    {
+                        var listaComVistos = JsonConvert.DeserializeObject<List<ClientesHoje>>(jsonVistos);
+                        foreach (var c in listaServidor)
+                        {
+                            var correspondente = listaComVistos.FirstOrDefault(x => x.Cliente == c.Cliente);
+                            if (correspondente != null)
+                                c.ContatoFeitoHoje = correspondente.ContatoFeitoHoje;
+                        }
+                    }
+                }
+
+                // Substitui lista em memória e persiste cache local
+
+                _listaCompletaServidor = listaServidor;
+                try
+                {
+                    await TryEnviarComandosPendentesAsync();
+                  
+                }
+                catch
+                {
+                    // ignora
+                }
+
+                try
+                {
+                    // salva o cache antigo em 'lista_clientes_cache_prev' antes de sobrescrever
+                    var oldCache = Preferences.Default.Get("lista_clientes_cache", "");
+                    if (!string.IsNullOrEmpty(oldCache))
+                    {
+                        Preferences.Default.Set("lista_clientes_cache_prev", oldCache);
+                    }
+
+                    Preferences.Default.Set("lista_clientes_cache", JsonConvert.SerializeObject(_listaCompletaServidor));
+                }
+                catch
+                {
+                    // se persistência falhar, não quebra o fluxo
+                }
+
+                // Regras de meta/contagem e listas dependentes
+                DateTime ultimaAtualizacao = Preferences.Default.Get("data_ultima_meta", DateTime.MinValue);
+                if (DateTime.Now.Date > ultimaAtualizacao.Date)
+                {
+                    Preferences.Default.Set("total_clientes_ontem", _listaCompletaServidor.Count);
+                    Preferences.Default.Set("data_ultima_meta", DateTime.Now.Date);
+                }
+
+                ProcessarListas();
+
+
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    _modoAtual = "ATIVOS";
+                    _searchEntry.Text = string.Empty;
+                    ExecutarBuscaReal();
+                });
+            
+                    sucesso = true;
+                    break;
+                }
+                catch (Exception)
+                {
+                    
+                }
+                finally
+                {
+                    MainThread.BeginInvokeOnMainThread(() => { _loader.IsRunning = false; _loader.IsVisible = false; _listView.Opacity = 1.0; });
+                }
+           }
+            if (!sucesso) 
+            { 
+                MainThread.BeginInvokeOnMainThread(async () => { 
+                    await DisplayAlert("Erro", "Não foi possível atualizar após 3 tentativas. Usando última lista disponível (offline).", "OK"); 
+                }); 
+            }
+        }
         private async Task PausarClienteNaPlanilha(string nome)
         {
             var clienteNoApp = _listaCompletaServidor.FirstOrDefault(c => c.Cliente == nome);
             if (clienteNoApp == null) return;
 
-            if (clienteNoApp.Pg == "R$ 100,00")
-            {
-                var dadosParaEnviar = new { cliente = nome, ativo = "NÃO", datapg = "", pg = "", situacao = "NOVO" };
+            int tentativas = 0; 
+            bool sucesso = false; 
 
-                // executar alterações locais ANTES (ou independente) da tentativa HTTP
-                clienteNoApp.IsPendente = false;
-                _listaPendentesLocal.RemoveAll(x => x.Cliente == clienteNoApp.Cliente);
-                SalvarPendentesNoDispositivo();
+          while (tentativas < 3 && !sucesso)
+          {
+                try
+                {
+                    tentativas++;
 
-                // tentar enviar — se offline, enfileira apenas o HTTP
-                var enviado = await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dadosParaEnviar, operation: "pausa", localRef: nome);
+                    if (clienteNoApp.Pg == "R$ 100,00")
+                    {
+                        var dadosParaEnviar = new { cliente = nome, ativo = "NÃO", datapg = "", pg = "", situacao = "NOVO" };
 
-                // limpar pendência remota também (não delegar re-execução local)
-                await LimparPendenciaNaPlanilha(clienteNoApp.Cliente);
-            }
-            else
-            {
-                var dados = new { cliente = nome, ativo = "NÃO", situacao = "NOVO" };
-                await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dados, operation: "pausa", localRef: nome);
+                        // executar alterações locais ANTES (ou independente) da tentativa HTTP
+                        clienteNoApp.IsPendente = false;
+                        _listaPendentesLocal.RemoveAll(x => x.Cliente == clienteNoApp.Cliente);
+                        SalvarPendentesNoDispositivo();
+
+                        // tentar enviar — se offline, enfileira apenas o HTTP
+                        var enviado = await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dadosParaEnviar, operation: "pausa", localRef: nome);
+
+                        // limpar pendência remota também (não delegar re-execução local)
+                        await LimparPendenciaNaPlanilha(clienteNoApp.Cliente);
+                    }
+                    else
+                    {
+                        var dados = new { cliente = nome, ativo = "NÃO", situacao = "NOVO" };
+                        await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dados, operation: "pausa", localRef: nome);
+                    }
+
+                    sucesso = true;
+                    break;
+                }
+                catch
+                {
+                    
+                }
+          }
+
+            if (!sucesso) { MainThread.BeginInvokeOnMainThread(async () => { 
+                await DisplayAlert("Erro", $"Não foi possível pausar o cliente '{nome}' após 3 tentativas.", "OK"); 
+            }); 
             }
         }
         public async Task EnviarDadosRenovacao(string nome, string planoC, bool pend, DateTime inicio, DateTime? datapg, DateTime fim, string v)
         {
+
             
-            var corpo = new Dictionary<string, string>
+                int tentativas = 0;
+                bool sucesso = false;
+            while (tentativas < 3 && !sucesso)
             {
-                { "cliente", nome },
-                { "plano", planoC.Split('-')[0].Replace("Plano", "").Replace("Combo", "").Trim() },
-                { "situacao", "RENOVA" },
-                { "ativo", "OK" },
-                { "inicio", inicio.ToString("dd/MM/yyyy") },
-                { "fim", fim.ToString("dd/MM/yyyy") }
-            };
+                
 
-            if (pend)
-            {
-                corpo.Add("datapg", datapg?.ToString("dd/MM/yyyy") ?? "");
-                corpo.Add("pg", v);
+                try
+                {
+                    tentativas++;
+
+                    var corpo = new Dictionary<string, string>
+                    {
+                        { "cliente", nome },
+                        { "plano", planoC.Split('-')[0].Replace("Plano", "").Replace("Combo", "").Trim() },
+                        { "situacao", "RENOVA" },
+                        { "ativo", "OK" },
+                        { "inicio", inicio.ToString("dd/MM/yyyy") },
+                        { "fim", fim.ToString("dd/MM/yyyy") }
+                    };
+
+                    if (pend)
+                    {
+                        corpo.Add("datapg", datapg?.ToString("dd/MM/yyyy") ?? "");
+                        corpo.Add("pg", v);
+                    }
+                    else
+                    {
+                        corpo.Add("datapg", "");
+                        corpo.Add("pg", "");
+                    }
+
+                    // chame a API — se falhar, será enfileirado APENAS o HTTP com metadata
+                    await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", corpo, operation: "renovacao", localRef: nome);
+
+                    sucesso = true;
+                    break;
+                }
+                catch
+                {
+
+                }
             }
-            else
+
+
+            if (!sucesso)
             {
-                corpo.Add("datapg", "");
-                corpo.Add("pg", "");
+             MainThread.BeginInvokeOnMainThread(async () => {
+             await DisplayAlert("Erro", $"Não foi possível renovar o cliente '{nome}' após 3 tentativas.", "OK");
+             });
             }
 
-            // chame a API — se falhar, será enfileirado APENAS o HTTP com metadata
-            await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", corpo, operation: "renovacao", localRef: nome);
-
-            // OBS: o acumulado do custo de anúncios é atualizado no ponto onde a NF é criada localmente
         }
         private async Task<bool> PostFormToPlanilhaAsync(string url, Dictionary<string, string> form, string? operation = null, string? localRef = null, bool showAlert = false)
         {
@@ -4287,8 +4364,33 @@ namespace Kflmulti
         }
         public async Task LimparPendenciaNaPlanilha(string nome)
         {
-            var dados = new { cliente = nome, datapg = "", pg = "" };
-            await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dados, operation: "limpar_pendencia", localRef: nome);
+            int tentativas = 0;
+            bool sucesso = false;
+
+            while (tentativas < 3 && !sucesso)
+            {
+                try
+                {
+                    tentativas++;
+                    var dados = new { cliente = nome, datapg = "", pg = "" };
+                    await PostJsonOrQueueAsync("https://kflmulti.com/AndroidStudio/AlteraPlanilha.php", dados, operation: "limpar_pendencia", localRef: nome);
+
+                    sucesso = true;
+                    break;
+                }
+
+                catch
+                {
+
+                }
+            }
+
+            if (!sucesso)
+            {
+                MainThread.BeginInvokeOnMainThread(async () => {
+                    await DisplayAlert("Erro", $"Não foi possível limpar pendência após 3 tentativas.", "OK");
+                });
+            }
         }
         private async Task<bool> PostJsonOrQueueAsync(string url, object body, string? operation = null, string? localRef = null)
         {
@@ -4345,77 +4447,92 @@ namespace Kflmulti
                 _pendingHttpCommands = new List<PendingHttpCommand>();
             }
         }
-        private async Task SalvarPendingCommandsToPrefsAsync()
+        private Task SalvarPendingCommandsToPrefsAsync()
         {
             try
             {
                 // captura cópia da fila para evitar race conditions enquanto serializa
                 var snapshot = (_pendingHttpCommands ?? new List<PendingHttpCommand>()).ToList();
                 var json = JsonConvert.SerializeObject(snapshot);
-                // executa a escrita em background para não bloquear a UI
-                await Task.Run(() => Preferences.Default.Set(KEY_PENDING_COMMANDS, json));
+
+                // chamada direta, síncrona
+                Preferences.Default.Set(KEY_PENDING_COMMANDS, json);
             }
-            catch
+            catch (Exception ex)
             {
-                // não falhar a UI em caso de erro de persistência
+                System.Diagnostics.Debug.WriteLine($"Erro ao salvar pendentes: {ex.Message}");
             }
+
+            // retorna uma Task já concluída para manter compatibilidade com await
+            return Task.CompletedTask;
         }
-        private async Task EnviarListaNfParaPlanilha()
+
+        private async Task<bool> EnviarListaNfParaPlanilha()
         {
             if (_listaNfLocal == null || _listaNfLocal.Count == 0)
             {
                 await DisplayAlert("Aviso", "Não há NF para enviar.", "OK");
-                return;
+                return false;
             }
 
             var clientesParaEnviar = _listaNfLocal.Select(n => n.Cliente).ToList();
             var dadosParaEnviar = new { clientes = clientesParaEnviar };
+            int tentativas = 0;
+            bool sucesso = false;
 
-            try
+            while (tentativas < 3 && !sucesso)
             {
-                // Faz o POST para o PHP
-                var enviado = await PostJsonOrQueueAsync(
-                    "https://kflmulti.com/AndroidStudio/NfPlanilha.php",
-                    dadosParaEnviar,
-                    operation: "inserir_nf",
-                    localRef: "lista_nf"
-                );
+                await ExecutarComLoader(async () =>
+                {
+                    try
+                    {
+                        tentativas++;
+                        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                        var json = JsonConvert.SerializeObject(dadosParaEnviar);
+                        var content = new StringContent(json, Encoding.UTF8, "application/json");
+                        var res = await client.PostAsync("https://kflmulti.com/AndroidStudio/NfPlanilha.php", content);
 
-                if (!enviado)
-                {
-                    await DisplayAlert("Erro", "Falha ao enviar lista de NF para a planilha.", "OK");
-                }
-                else
-                {
-                    //await DisplayAlert("Sucesso", $"{clientesParaEnviar.Count} clientes enviados para a planilha.", "OK");
-                }
+                        if (res.IsSuccessStatusCode)
+                        {
+                            
+                            sucesso = true;
+                            
+                            
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"Falha ao enviar NF (tentativa {tentativas}): {res.StatusCode}");
+                        }
+
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Erro ao enviar NF: {ex.Message}");
+                    }
+                });
+
+                if (sucesso) break;
             }
-            catch (Exception ex)
+            
+
+            if (!sucesso)
             {
-                // Mostra o erro detalhado
-                await DisplayAlert("Erro", $"Ocorreu um erro: {ex.Message}", "OK");
+                MainThread.BeginInvokeOnMainThread(async () => {
+                    await DisplayAlert("Erro", $"Não foi possível enviar as NFs após 3 tentativas.", "OK");
+                });
             }
+
+            return sucesso;
         }
-        
+
         #endregion
 
         #region Relatórios e Fechamentos mensais
         private async Task EnviarRelatorioWhatsapp()
         {
-            string mensagem = GerarRelatorioMensal();
-            try
-            {
-                string url = $"https://api.whatsapp.com/send?text={Uri.EscapeDataString(mensagem)}";
-                await Launcher.Default.OpenAsync(new Uri(url));
-            }
-            catch (Exception)
-            {
-                await Share.Default.RequestAsync(new ShareTextRequest { Text = mensagem });
-            }
-        }
-        private async Task VerHistoricoMensal()
-        {
             var mapaRelatorios = new Dictionary<string, string>();
+            mapaRelatorios.Add("🕒 PARCIAL DO MÊS", "PARCIAL");
+
             for (int i = 0; i < 12; i++)
             {
                 var dataRef = DateTime.Now.AddMonths(-i);
@@ -4427,117 +4544,185 @@ namespace Kflmulti
                 }
             }
 
-            if (mapaRelatorios.Count == 0) { await DisplayAlert("Histórico", "Nenhum relatório automático foi salvo ainda.", "OK"); return; }
+            string escolha = await DisplayActionSheet("Selecione o Relatório para enviar:", "Cancelar", null, mapaRelatorios.Keys.ToArray());
+            if (escolha == "Cancelar" || !mapaRelatorios.ContainsKey(escolha))
+                return;
+
+            string conteudoRelatorio = "";
+            if (mapaRelatorios[escolha] == "PARCIAL")
+                conteudoRelatorio = GerarRelatorioMensal(DateTime.Now);
+            else
+                conteudoRelatorio = Preferences.Default.Get($"relatorio_{mapaRelatorios[escolha]}", "");
+
+            if (string.IsNullOrEmpty(conteudoRelatorio))
+            {
+                await DisplayAlert("Erro", "Não há dados disponíveis para este relatório.", "OK");
+                return;
+            }
+
+            // 🔹 Aqui você gera o PDF a partir do texto
+            var pdfBytes = GerarPdfDoRelatorio(conteudoRelatorio);
+
+            // 🔹 Salva temporariamente o PDF no dispositivo
+            string filePath = IOPath.Combine(FileSystem.CacheDirectory, "relatorio.pdf");
+
+            File.WriteAllBytes(filePath, pdfBytes);
+
+            // 🔹 Abre WhatsApp com o PDF anexado
+            await Share.RequestAsync(new ShareFileRequest
+            {
+                Title = $"Relatório {escolha}",
+                File = new ShareFile(filePath)
+            });
+        }      
+        private byte[] GerarPdfDoRelatorio(string texto)
+        {
+            using (var doc = new PdfDocument())
+            {
+                var page = doc.AddPage();
+                var gfx = XGraphics.FromPdfPage(page);
+                var font = new XFont("Arial", 12, XFontStyle.Regular);
+
+                // escreve o texto no PDF
+                gfx.DrawString(texto, font, XBrushes.Black,
+                    new XRect(20, 20, page.Width - 40, page.Height - 40),
+                    XStringFormats.TopLeft);
+
+                using (var stream = new MemoryStream())
+                {
+                    doc.Save(stream, false);
+                    return stream.ToArray();
+                }
+            }
+        }
+        private async Task VerHistoricoMensal()
+        {
+            var mapaRelatorios = new Dictionary<string, string>();
+
+            // adiciona primeiro a opção de relatório parcial do mês atual
+            mapaRelatorios.Add("🕒 PARCIAL DO MÊS", "PARCIAL");
+
+            // depois lista os últimos 12 meses já fechados
+            for (int i = 0; i < 12; i++)
+            {
+                var dataRef = DateTime.Now.AddMonths(-i);
+                string chave = dataRef.ToString("MM_yyyy");
+                if (Preferences.Default.ContainsKey($"relatorio_{chave}"))
+                {
+                    string nomeAmigavel = dataRef.ToString("MMMM / yyyy").ToUpper();
+                    mapaRelatorios.Add(nomeAmigavel, chave);
+                }
+            }
 
             string escolha = await DisplayActionSheet("Selecione o Relatório:", "Cancelar", null, mapaRelatorios.Keys.ToArray());
             if (escolha != "Cancelar" && mapaRelatorios.ContainsKey(escolha))
             {
-                string chaveReal = mapaRelatorios[escolha];
-                string conteudoRelatorio = Preferences.Default.Get($"relatorio_{chaveReal}", "");
+                string conteudoRelatorio = "";
+
+                if (mapaRelatorios[escolha] == "PARCIAL")
+                {
+                    // gera relatório parcial com dados atuais
+                    conteudoRelatorio = GerarRelatorioMensal(DateTime.Now);
+                }
+                else
+                {
+                    // pega relatório já salvo
+                    string chaveReal = mapaRelatorios[escolha];
+                    conteudoRelatorio = Preferences.Default.Get($"relatorio_{chaveReal}", "");
+                }
+
+                if (string.IsNullOrEmpty(conteudoRelatorio))
+                {
+                    await DisplayAlert(escolha, "Não há dados disponíveis para este mês.", "OK");
+                    return;
+                }
+
                 string acao = await DisplayActionSheet($"Relatório {escolha}", "Voltar", null, "Visualizar", "Enviar para WhatsApp");
-                if (acao == "Visualizar") await DisplayAlert(escolha, conteudoRelatorio, "OK");
-                else if (acao == "Enviar para WhatsApp") await Launcher.Default.OpenAsync($"https://api.whatsapp.com/send?text={Uri.EscapeDataString(conteudoRelatorio)}");
+                if (acao == "Visualizar")
+                    await DisplayAlert(escolha, conteudoRelatorio, "OK");
+                else if (acao == "Enviar para WhatsApp")
+                    await Launcher.Default.OpenAsync($"https://api.whatsapp.com/send?text={Uri.EscapeDataString(conteudoRelatorio)}");
             }
         }
         private void VerificarFechamentoMensal()
         {
             var hoje = DateTime.Now.Date;
 
-            // pega a última vez que rodou a limpeza
             var ultimaLimpezaStr = Preferences.Default.Get("ultimo_limpeza_mensal", "");
-            DateTime ultimaLimpeza;
-
-            // se já existe registro e foi feito hoje, não faz de novo
-            if (DateTime.TryParse(ultimaLimpezaStr, out ultimaLimpeza))
+            if (DateTime.TryParse(ultimaLimpezaStr, out DateTime ultimaLimpeza))
             {
                 if (ultimaLimpeza.Date == hoje)
-                {
                     return; // já limpou hoje
-                }
             }
 
-            // se for dia 01, faz a limpeza e registra
             if (hoje.Day == 1)
             {
-                LimparDadosMensais();
+                SalvarFechamentoMes(); // gera snapshot mensal
+                LimparDadosMensais();  // zera acumulados
                 Preferences.Default.Set("ultimo_limpeza_mensal", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
             }
         }
         private void SalvarFechamentoMes()
         {
-            string mesAnoChave = DateTime.Now.ToString("MM_yyyy");
+            var hoje = DateTime.Now;
 
-            // gera relatório para o mês corrente
-            string dadosFechamento = GerarRelatorioMensal(DateTime.Now);
-            Preferences.Default.Set($"relatorio_{mesAnoChave}", dadosFechamento);
-            Preferences.Default.Set($"relatorio_salvo_{mesAnoChave}", true);
-
-            // salva snapshot das NFs do mês atual para referência futura
-            try
+            // Caso seja dia 1, salva fechamento do mês anterior
+            if (hoje.Day == 1)
             {
-                Preferences.Default.Set($"nfs_mes_{mesAnoChave}", JsonConvert.SerializeObject(_listaNfLocal ?? new List<NfModel>()));
+                var mesAnterior = hoje.AddMonths(-1);
+                string chaveMesAnterior = mesAnterior.ToString("MM_yyyy");
+
+                string dadosFechamento = GerarRelatorioMensal(mesAnterior);
+                Preferences.Default.Set($"relatorio_{chaveMesAnterior}", dadosFechamento);
+
+                var nfsMes = JsonConvert.DeserializeObject<List<NfModel>>(
+                    Preferences.Default.Get($"nfs_mes_{chaveMesAnterior}", "")
+                ) ?? new List<NfModel>();
+                Preferences.Default.Set($"nfs_mes_{chaveMesAnterior}", JsonConvert.SerializeObject(nfsMes));
+
+                double acumuladoAnuncios = Preferences.Default.Get(KEY_CUSTO_ANUNCIOS_MES, 0.0);
+                Preferences.Default.Set($"custo_anuncios_mes_{chaveMesAnterior}", acumuladoAnuncios);
+
+                try
+                {
+                    var imposto = CalcularImpostoParaMes(mesAnterior);
+                    AdicionarImpostoFixoParaMes(mesAnterior, imposto);
+                }
+                catch { }
+
+                LimparDadosMensais();
             }
-            catch
+            else
             {
-                // não falhar o fechamento se persistência der problema
+                // Se não for dia 1, verifica se o mês anterior já tem relatório
+                var mesAnterior = hoje.AddMonths(-1);
+                string chaveMesAnterior = mesAnterior.ToString("MM_yyyy");
+
+                if (!Preferences.Default.ContainsKey($"relatorio_{chaveMesAnterior}"))
+                {
+                    // Gera retroativo do mês anterior
+                    SalvarFechamentoMesRetroativo(mesAnterior);
+                }
             }
-
-            // salva snapshot do acumulado de anúncios deste mês
-            double acumuladoAnuncios = Preferences.Default.Get(KEY_CUSTO_ANUNCIOS_MES, 0.0);
-            Preferences.Default.Set($"custo_anuncios_mes_{mesAnoChave}", acumuladoAnuncios);
-
-            // Calcula imposto do mês que foi fechado (mês atual) e adiciona como gasto fixo no dia 20
-            try
-            {
-                var imposto = CalcularImpostoParaMes(DateTime.Now);
-                AdicionarImpostoFixoParaMes(DateTime.Now, imposto);
-            }
-            catch
-            {
-                // não falhar o fechamento se houver problema no cálculo/persistência
-            }
-
-            // limpa lista de NFs do mês (inicia nova lista para o próximo mês)
-            _listaNfLocal.Clear();
-            try { Preferences.Default.Set("lista_nf_salva", JsonConvert.SerializeObject(_listaNfLocal)); } catch { }
-
-            // zera acumulados mensais relevantes
-            LimparDadosMensais();
         }
         private void SalvarFechamentoMesRetroativo(DateTime data)
         {
             string mesAnoChave = data.ToString("MM_yyyy");
 
-            // Tenta recuperar snapshot de NFs desse mês, se existir
-            List<NfModel> nfsParaMes = new List<NfModel>();
+            List<NfModel> nfsParaMes;
             try
             {
                 var jsonSnap = Preferences.Default.Get($"nfs_mes_{mesAnoChave}", "");
-                if (!string.IsNullOrEmpty(jsonSnap))
-                {
-                    nfsParaMes = JsonConvert.DeserializeObject<List<NfModel>>(jsonSnap) ?? new List<NfModel>();
-                }
-                else
-                {
-                    // fallback: filtra a lista atual por data do mês solicitado
-                    nfsParaMes = (_listaNfLocal ?? Enumerable.Empty<NfModel>())
-                        .Where(n =>
-                        {
-                            var dt = ParseNfDate(n.Data);
-                            return dt != null && dt.Value.Month == data.Month && dt.Value.Year == data.Year;
-                        })
-                        .ToList();
-
-                    // persiste snapshot para referência futura
-                    Preferences.Default.Set($"nfs_mes_{mesAnoChave}", JsonConvert.SerializeObject(nfsParaMes));
-                }
+                nfsParaMes = !string.IsNullOrEmpty(jsonSnap)
+                    ? JsonConvert.DeserializeObject<List<NfModel>>(jsonSnap) ?? new List<NfModel>()
+                    : new List<NfModel>();
             }
             catch
             {
                 nfsParaMes = new List<NfModel>();
             }
 
-            // Gera relatório usando os NFs selecionados (criamos conteúdo manualmente para não depender de _listaNfLocal)
+            // gera relatório com base no snapshot mensal
             var ativosOk = _listaCompletaServidor.Where(c => c.Ativo?.Trim().ToLower() == "ok").ToList();
             double totalFaturamentoAtivos = ativosOk.Sum(c => ObterValorPorNomePlano(c.Plano));
             double totalNfMes = nfsParaMes.Sum(n => ParseValor(n.Valor));
@@ -4564,62 +4749,36 @@ namespace Kflmulti
 
             Preferences.Default.Set($"relatorio_{mesAnoChave}", texto);
 
-            // salva snapshot do acumulado de anúncios para esse mês (se aplicável)
+            // salva acumulados
             double acumuladoAnuncios = Preferences.Default.Get(KEY_CUSTO_ANUNCIOS_MES, 0.0);
             Preferences.Default.Set($"custo_anuncios_mes_{mesAnoChave}", acumuladoAnuncios);
 
-            // adiciona imposto como gasto fixo para o mês retroativo (vencimento dia 20)
             try
             {
                 var imposto = CalcularImpostoParaMes(data);
                 AdicionarImpostoFixoParaMes(data, imposto);
             }
-            catch
-            {
-                // não falhar se houver problema no cálculo/persistência
-            }
-
-            // persiste snapshot das despesas variáveis daquele mês (se ainda não salvo)
-            try
-            {
-                string chaveVarsMes = $"fin_var_expenses_{mesAnoChave}";
-                if (!Preferences.Default.ContainsKey(chaveVarsMes))
-                    Preferences.Default.Set(chaveVarsMes, JsonConvert.SerializeObject(_variableExpenses));
-            }
             catch { }
         }
         private void LimparDadosMensais()
         {
-            // Limpa NFs/atividades do mês atual e persiste a lista vazia
-            _listaNfLocal.Clear();
-            try { Preferences.Default.Set("lista_nf_salva", JsonConvert.SerializeObject(_listaNfLocal)); } catch { }
+            // não mexe nos snapshots mensais (nfs_mes_MM_yyyy, relatorio_MM_yyyy)
+            // apenas zera acumulados que reiniciam a cada mês
 
-            // limpa outras listas mensais persistentes (mantive comportamento atual)
-            Preferences.Default.Remove("relatorio_mensal");
-
-            // limpa gastos variáveis (recomeçam a cada mês)
             _variableExpenses.Clear();
             _variableExpensesReds.Clear();
             Preferences.Default.Set("despesas_cigarro_mes", 0.0);
             Preferences.Default.Set("despesas_mercado_mes", 0.0);
             Preferences.Default.Set("despesas_combustivel_mes", 0.0);
 
-            // não zera imposto, apenas mantém o último salvo
-            double impostoAnterior = Preferences.Default.Get("imposto_mes_anterior", 0.0);
-
-
-            // mantém gastos fixos cadastrados, mas "desmarca" os vistos/included
             foreach (var f in _fixedExpenses)
                 f.Included = false;
 
-            // persiste alterações de despesas
             SalvarDespesasFinancas();
 
-            // limpa acumulado do meu anúncio
             Preferences.Default.Set("meu_anuncio_total_mes", 0.0);
             Preferences.Default.Remove("meu_anuncio_ultimo_dia");
 
-            // limpa acumulado de custo de anúncios do mês
             Preferences.Default.Set(KEY_CUSTO_ANUNCIOS_MES, 0.0);
 
             AtualizarDashboardFinanceiro();
@@ -4627,6 +4786,21 @@ namespace Kflmulti
 
             Preferences.Default.Set(KEY_TOTAL_NF_MES, 0.0);
             _totalNfMesPersistido = 0.0;
+        }
+        private void AdicionarNfAoMes(NfModel nf)
+        {
+            string mesAnoChave = DateTime.Now.ToString("MM_yyyy");
+
+            // Recupera snapshot existente
+            var nfsMes = JsonConvert.DeserializeObject<List<NfModel>>(
+                Preferences.Default.Get($"nfs_mes_{mesAnoChave}", "")
+            ) ?? new List<NfModel>();
+
+            // Adiciona a nova NF
+            nfsMes.Add(nf);
+
+            // Persiste novamente
+            Preferences.Default.Set($"nfs_mes_{mesAnoChave}", JsonConvert.SerializeObject(nfsMes));
         }
         private double CalcularImpostoParaMes(DateTime mesRef)
         {
@@ -5056,6 +5230,25 @@ namespace Kflmulti
                 await DisplayAlert("Erro ao limpar cache", ex.Message, "OK");
             }
         }
+        private void LimparListasEPersistir()
+        {
+            _listaNfLocal.Clear();
+            _listaRenovadosHoje.Clear();
+            _listaPausadosHoje.Clear();
+            _listaNovosHoje.Clear();
+            _listaRetornadosHoje.Clear();
+            _listaPendentesPagos.Clear();
+            _pendingHttpCommands.Clear();
+
+
+            SalvarPausadosNoDispositivo();
+            SalvarRenovadosNoDispositivo();
+            SalvarNovosNoDispositivo();
+            SalvarRetornadosNoDispositivo();
+            SalvarPendentesPagosNoDispositivo();
+            SalvarPendingCommandsToPrefsAsync();
+        }
+
 
         #endregion
 
@@ -5063,7 +5256,7 @@ namespace Kflmulti
 
 
 
-        
+
 
 
 
