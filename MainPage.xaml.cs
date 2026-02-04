@@ -54,9 +54,14 @@ namespace Kflmulti
         private const string KEY_NOVOS_HOJE = "novos_hoje";
         private const string KEY_RETORNADOS_HOJE = "retornados_hoje";
         private const string KEY_PENDENTES_PAGOS = "pendentes_pagos";
+        private const string KEY_PRIMEIRA_RENOVACAO = "primeira_renovacao_hoje";
+        private const string KEY_RENOVACOES_MES = "renovacoes_mes";
+
         // Adicione junto às outras chaves/preferences (campos no topo da classe)
         private const string KEY_TOTAL_NF_MES = "total_nf_mes_acumulado";
+        
         private double _totalNfMesPersistido = 0.0;
+        
 
         private const string KEY_FIXED = "fin_fixed_expenses";
         private const string KEY_VAR = "fin_var_expenses";
@@ -119,6 +124,8 @@ namespace Kflmulti
         private List<string> _listaPausadosHoje = new();
         private List<string> _listaNovosHoje = new();
         private List<string> _listaRetornadosHoje = new();
+        private List<string> _listaPrimeiraRenovacao = new();
+        private List<string> _listaRenovacoesMes = new();
         private List<string> _planosDisponiveis = new()
         {
             "Plano GOLD - R$ 150,00", "Combo GOLD SMART - R$ 300,00", "Combo GOLD ADVANCED - R$ 600,00",
@@ -140,6 +147,7 @@ namespace Kflmulti
             if (!string.IsNullOrEmpty(jsonNf)) _listaNfLocal = JsonConvert.DeserializeObject<List<NfModel>>(jsonNf);
 
             _totalNfMesPersistido = Preferences.Default.Get(KEY_TOTAL_NF_MES, 0.0);
+            
 
             _searchTimer = new System.Timers.Timer(400);
             _searchTimer.AutoReset = false;
@@ -176,6 +184,8 @@ namespace Kflmulti
             CarregarRetornadosDoDispositivo();
             CarregarPendentesPagosDoDispositivo();
             CarregarPendentesDoDispositivo();
+            CarregarPrimeiraRenovacaoDoDispositivo();
+            CarregarRenovacoesMesDoDispositivo();
 
             try
             {
@@ -700,163 +710,18 @@ namespace Kflmulti
             int renovadosCount = _listaRenovadosHoje?.Count ?? 0;
             int pausadosCount = _listaPausadosHoje?.Count ?? 0;
             int pendentesCount = _listaPendentesLocal?.Count ?? 0;
+            int novosCount = _listaNovosHoje?.Count ?? 0;
+            int retornadosCount = _listaRetornadosHoje?.Count ?? 0;
+            int primeiraRenovacaoCount = _listaPrimeiraRenovacao?.Count ?? 0;
+            int RenovacaoTotaisCount = _listaRenovacoesMes?.Count ?? 0;
 
             double custoMeuAnuncioHoje = _meuAnuncioAtivo ? 100.00 : 0.00;
 
-            // calcula quantos clientes são "novos" comparando com o cache anterior
-            // calcula quantos clientes são "novos" comparando com o cache anterior
-            int novosClientes = 0;
-            List<string> novosLista = new();
-            try
-            {
-                var prevJson = Preferences.Default.Get("lista_clientes_cache_prev", "");
-                if (!string.IsNullOrEmpty(prevJson))
-                {
-                    var prevList = JsonConvert.DeserializeObject<List<ClientesHoje>>(prevJson) ?? new List<ClientesHoje>();
-                    var prevNames = new HashSet<string>(prevList.Where(x => !string.IsNullOrEmpty(x.Cliente)).Select(x => x.Cliente.Trim()), StringComparer.OrdinalIgnoreCase);
-                    var encontrados = _listaCompletaServidor
-                        .Where(c => !string.IsNullOrEmpty(c.Cliente) && !prevNames.Contains(c.Cliente.Trim()))
-                        .Select(c => c.Cliente.Trim())
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-
-                    novosLista = encontrados;
-                    novosClientes = encontrados.Count;
-
-                    // persiste os nomes para ficar estável ao longo do dia
-                    // persiste individualmente para garantir atualização imediata no relatório
-                    foreach (var n in encontrados)
-                    {
-                        AddNovo(n);
-                    }
-                    // após o foreach (var n in encontrados) { AddNovo(n); }
-                    novosClientes = _listaNovosHoje?.Count ?? 0;
-                }
-                else
-                {
-                    novosClientes = totalHoje > totalOntem ? totalHoje - totalOntem : 0;
-                    // sem cache anterior não é possível identificar nomes — manter _listaNovosHoje se já houver
-                }
-            }
-            catch
-            {
-                novosClientes = totalHoje > totalOntem ? totalHoje - totalOntem : 0;
-                novosLista = _listaNovosHoje;
-            }
-
-            // calcula retornados comparando cache anterior
-            int retornadosCount = 0;
-            List<ClientesHoje> retornadosLista = new();
-            try
-            {
-                var prevJson = Preferences.Default.Get("lista_clientes_cache_prev", "");
-                var prevList = !string.IsNullOrEmpty(prevJson)
-                    ? JsonConvert.DeserializeObject<List<ClientesHoje>>(prevJson) ?? new List<ClientesHoje>()
-                    : new List<ClientesHoje>();
-
-                // mapa seguro (evita erro em caso de duplicatas no cache)
-                var prevMap = prevList
-                    .Where(p => !string.IsNullOrWhiteSpace(p.Cliente))
-                    .GroupBy(p => p.Cliente!.Trim(), StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
-                // lista de nomes que são "retornados" (ativos agora e não ativos antes)
-                var novosSet = new HashSet<string>(_listaNovosHoje ?? Enumerable.Empty<string>(), StringComparer.OrdinalIgnoreCase);
-
-                var retornadosNomes = _listaCompletaServidor
-                    .Where(x => string.Equals(x.Ativo?.Trim(), "ok", StringComparison.OrdinalIgnoreCase))
-                    .Select(atual => (atual.Cliente ?? "").Trim())
-                    .Where(nome =>
-                        !string.IsNullOrEmpty(nome)
-                        // somente se EXISTIA no cache anterior
-                        && prevMap.TryGetValue(nome, out var antes)
-                        // e antes não estava ativo
-                        && !string.Equals(antes.Ativo?.Trim(), "ok", StringComparison.OrdinalIgnoreCase)
-                        // e não foi detectado como novo no mesmo ciclo
-                        && !novosSet.Contains(nome)
-                    )
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                // preservar/mesclar retornados persistidos ao invés de sobrescrever
-                if (_listaRetornadosHoje == null || _listaRetornadosHoje.Count == 0)
-                {
-                    _listaRetornadosHoje = retornadosNomes;
-                }
-                else
-                {
-                    var set = new HashSet<string>(_listaRetornadosHoje, StringComparer.OrdinalIgnoreCase);
-                    foreach (var n in retornadosNomes)
-                    {
-                        AddRetornado(n);
-                    }
-                }
-
-                // sincroniza lista de objetos retornados para contagens e uso posterior
-                var retornadosSetFinal = new HashSet<string>(_listaRetornadosHoje, StringComparer.OrdinalIgnoreCase);
-                retornadosLista = _listaCompletaServidor
-                    .Where(c => !string.IsNullOrWhiteSpace(c.Cliente) && retornadosSetFinal.Contains(c.Cliente.Trim()))
-                    .ToList();
-
-                retornadosCount = _listaRetornadosHoje.Count;
-                // SalvarRetornadosNoDispositivo() já é chamado por AddRetornado quando necessário
-                SalvarRetornadosNoDispositivo();
-            }
-            catch
-            {
-                retornadosCount = 0;
-                retornadosLista = new List<ClientesHoje>();
-            }
-
-            // --- Persistir contagem de "RET. (HOJE)" para não zerar em atualizações subsequentes ---
-            string hojeStr = DateTime.Now.ToString("yyyy-MM-dd");
-            string chaveRetornoHoje = "retornados_hoje_count";
-            string chaveRetornoHojeUltimo = "retornados_hoje_ultimo_dia";
-            string ultimoDiaRetorno = Preferences.Default.Get(chaveRetornoHojeUltimo, "");
-
-            if (ultimoDiaRetorno != hojeStr)
-            {
-                // primeiro cálculo do dia: armazena
-                Preferences.Default.Set(chaveRetornoHoje, retornadosCount);
-                Preferences.Default.Set(chaveRetornoHojeUltimo, hojeStr);
-            }
-            else
-            {
-                // dia já persistido: recupera o valor salvo para estabilidade durante o dia
-                retornadosCount = Preferences.Default.Get(chaveRetornoHoje, retornadosCount);
-            }
-
-            // persiste "retornados do mês" evitando duplicar no mesmo dia
-            string chaveMes = $"retornados_mes_{DateTime.Now:MM_yyyy}";
-            string chaveMesUltimoDia = chaveMes + "_ultimo_dia";
-            int retornadosMesPersistido = Preferences.Default.Get(chaveMes, 0);
-            string ultimoDiaSalvo = Preferences.Default.Get(chaveMesUltimoDia, "");
-            if (!string.IsNullOrEmpty(hojeStr) && ultimoDiaSalvo != hojeStr)
-            {
-                // soma os retornados detectados hoje ao acumulado mensal e marca o dia para evitar duplicação
-                if (retornadosCount > 0)
-                {
-                    retornadosMesPersistido += retornadosCount;
-                    Preferences.Default.Set(chaveMes, retornadosMesPersistido);
-                }
-                Preferences.Default.Set(chaveMesUltimoDia, hojeStr);
-            }
-            // valor exibido
-            int retornadosDoMes = Preferences.Default.Get(chaveMes, 0);
-
-            // conta retornados que estão fazendo a 1ª renovação (renovacoes == 1)
-            int retornadosPrimeiraRenovacao = retornadosLista.Count(r => GetRenovacoesCount(r.Cliente) == 1);
-
-            // soma retornados ao número de renovados exibido (conforme pedido)
-            int renovadosComRetorno = renovadosCount + retornadosCount;
+           
 
             // ... UI ...
-            layout.Add(new Label { Text = "GESTÃO OPERACIONAL", FontSize = ObterFonteResponsiva("GESTÃO OPERACIONAL", 20, 16), FontAttributes = FontAttributes.Bold, HorizontalOptions = LayoutOptions.Center, TextColor = Color.FromArgb("#263238") });
-
-            int totalOntemCount = Preferences.Default.Get("total_clientes_ontem", _listaCompletaServidor.Count);
-            int totalAcoes = renovadosComRetorno + Math.Max(0, totalHoje - totalOntemCount);
-            double progresso = Math.Min(1.0, (double)totalAcoes / 7.0);
-            layout.Add(new ProgressBar { Progress = progresso, ProgressColor = totalAcoes >= 7 ? Color.FromArgb("#FFD54F") : Color.FromArgb("#1976D2"), HeightRequest = 14 });
+            layout.Add(new Label { Text = "GESTÃO OPERACIONAL", FontSize = ObterFonteResponsiva("GESTÃO OPERACIONAL", 20, 16), FontAttributes = FontAttributes.Bold, HorizontalOptions = LayoutOptions.Center, TextColor = Color.FromArgb("#263238") });          
+            
 
             var gridStats = new Grid
             {
@@ -872,8 +737,9 @@ namespace Kflmulti
             gridStats.Add(CriarCardStatus("PAUSADOS", $"{pausadosCount}", Color.FromArgb("#9E9E9E")), 2, 0);
 
             gridStats.Add(CriarCardStatus("ATIVOS", $"{_listaAtivosOk.Count}", Color.FromArgb("#1976D2")), 0, 1);
-            gridStats.Add(CriarCardStatus("RENOVADOS", $"{renovadosComRetorno}", Color.FromArgb("#2E7D32")), 1, 1);
-            gridStats.Add(CriarCardStatus("NOVOS", $"{novosClientes}", Color.FromArgb("#388E3C")), 2, 1);
+            gridStats.Add(CriarCardStatus("RENOVADOS", $"{renovadosCount}", Color.FromArgb("#2E7D32")), 1, 1);
+            gridStats.Add(CriarCardStatus("REN. (MÊS)", $"{RenovacaoTotaisCount}", Color.FromArgb("#00796B")), 2, 1);
+            
 
             layout.Add(gridStats);
 
@@ -885,8 +751,9 @@ namespace Kflmulti
                 Margin = new Thickness(0, 8, 0, 0)
             };
             gridRetornos.Add(CriarCardStatus("RET. (HOJE)", $"{retornadosCount}", Color.FromArgb("#4CAF50")), 0, 0);
-            gridRetornos.Add(CriarCardStatus("RET. (MÊS)", $"{retornadosDoMes}", Color.FromArgb("#00796B")), 1, 0);
-            gridRetornos.Add(CriarCardStatus("1ª RENOVA", $"{retornadosPrimeiraRenovacao}", Color.FromArgb("#546E7A")), 2, 0);
+            gridRetornos.Add(CriarCardStatus("NOVOS", $"{novosCount}", Color.FromArgb("#388E3C")), 1, 0);
+            
+            gridRetornos.Add(CriarCardStatus("1ª RENOVA", $"{primeiraRenovacaoCount}", Color.FromArgb("#546E7A")), 2, 0);
 
             layout.Add(gridRetornos);
 
@@ -1227,6 +1094,7 @@ namespace Kflmulti
         {
             var scroll = new ScrollView { BackgroundColor = Colors.White };
             var detalhesStack = new VerticalStackLayout { Padding = 15, Spacing = 10, BackgroundColor = Colors.White };
+            int renovacoesCount = GetRenovacoesCount(c.Cliente);
 
             var lblNome = new Label
             {
@@ -1396,7 +1264,10 @@ namespace Kflmulti
                         _listaNfLocal.Add(nf);
                         Preferences.Default.Set("lista_nf_salva", JsonConvert.SerializeObject(_listaNfLocal));
                         AdicionarNfAoMes(nf);
+                        AddRenovacaoMes(c.Cliente);
                         AddToTotalNfMes(ParseValor(valorFinal));
+
+                        
 
                         // acumula custo de anúncios
                         double custoPorDia = Preferences.Default.Get(KEY_CUSTO_POR_DIA, 8.0);
@@ -1446,8 +1317,13 @@ namespace Kflmulti
                     {
                         AddRetornado(c.Cliente);
                     }
+                    if (renovacoesCount == 1)
+                    {
+                        AddPrimeiraRenovacao(c.Cliente);
+                    }
+                    
 
-                    ProcessarListas();
+                        ProcessarListas();
                     AtualizarDashboardFinanceiro();
                     SalvarVistosLocais();
 
@@ -1595,7 +1471,7 @@ namespace Kflmulti
             
             string planoLimpo = LimparNomePlano(c.Plano); 
 
-            var p = c.Plano ?? "";
+            
             // guarda nome original (ajuda a localizar registro se nome for alterado)
             string originalName = c.Cliente ?? "";
 
@@ -1836,11 +1712,6 @@ namespace Kflmulti
             }
             catch { _listaNovosHoje = new List<string>(); }
         }
-        private void SalvarRetornadosNoDispositivo()
-        {
-            try { Preferences.Default.Set(KEY_RETORNADOS_HOJE, JsonConvert.SerializeObject(_listaRetornadosHoje)); }
-            catch { /* não falhar a UI */ }
-        }
         private void AddRetornado(string nome)
         {
             if (string.IsNullOrWhiteSpace(nome)) return;
@@ -1907,6 +1778,12 @@ namespace Kflmulti
                 // não falhar fluxo principal
             }
         }
+        private void SalvarRetornadosNoDispositivo()
+        {
+            try { Preferences.Default.Set(KEY_RETORNADOS_HOJE, JsonConvert.SerializeObject(_listaRetornadosHoje)); }
+            catch { /* não falhar a UI */ }
+        }
+        
         private void CarregarRetornadosDoDispositivo()
         {
             try
@@ -1950,6 +1827,98 @@ namespace Kflmulti
                 _listaRetornadosHoje = new List<string>();
             }
         }
+        // chave persistente
+        
+
+        // adicionar renovação ao mês
+        private void AddRenovacaoMes(string nome)
+        {
+            if (string.IsNullOrWhiteSpace(nome)) return;
+            try
+            {
+                var trimmed = nome.Trim();
+
+                if (_listaRenovacoesMes == null) _listaRenovacoesMes = new List<string>();
+
+                // adicionar se não existir
+                if (!_listaRenovacoesMes.Any(n => string.Equals(n, trimmed, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _listaRenovacoesMes.Add(trimmed);
+                    SalvarRenovacoesMesNoDispositivo();
+
+                    // Atualiza contador mensal persistido
+                    try
+                    {
+                        string mesStr = DateTime.Now.ToString("MM_yyyy");
+                        string chaveRenMes = "renovacoes_mes_count";
+                        string chaveRenMesUltimo = "renovacoes_mes_ultimo";
+                        string ultimoMesRen = Preferences.Default.Get(chaveRenMesUltimo, "");
+
+                        if (ultimoMesRen != mesStr)
+                        {
+                            Preferences.Default.Set(chaveRenMes, 1);
+                            Preferences.Default.Set(chaveRenMesUltimo, mesStr);
+                        }
+                        else
+                        {
+                            int atual = Preferences.Default.Get(chaveRenMes, 0);
+                            Preferences.Default.Set(chaveRenMes, atual + 1);
+                        }
+                    }
+                    catch { /* não falhar fluxo principal */ }
+                }
+
+                // atualizar dashboard/UI imediatamente
+                ProcessarListas();
+                AtualizarDashboardFinanceiro();
+            }
+            catch
+            {
+                // não falhar fluxo principal
+            }
+        }
+
+        // salvar lista no dispositivo
+        private void SalvarRenovacoesMesNoDispositivo()
+        {
+            try { Preferences.Default.Set(KEY_RENOVACOES_MES, JsonConvert.SerializeObject(_listaRenovacoesMes)); }
+            catch { /* não falhar a UI */ }
+        }
+
+        // carregar lista do dispositivo
+        private void CarregarRenovacoesMesDoDispositivo()
+        {
+            try
+            {
+                var json = Preferences.Default.Get(KEY_RENOVACOES_MES, "");
+                if (string.IsNullOrEmpty(json))
+                {
+                    _listaRenovacoesMes = new List<string>();
+                    return;
+                }
+
+                var nomes = JsonConvert.DeserializeObject<List<string>>(json) ?? new List<string>();
+                var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _listaRenovacoesMes = new List<string>();
+
+                foreach (var n in nomes)
+                {
+                    if (string.IsNullOrWhiteSpace(n)) continue;
+                    var t = n.Trim();
+
+                    if (!set.Contains(t))
+                    {
+                        set.Add(t);
+                        _listaRenovacoesMes.Add(t);
+                    }
+                }
+            }
+            catch
+            {
+                _listaRenovacoesMes = new List<string>();
+            }
+        }
+
         private void AddRenovado(ClientesHoje cliente)
         {
             if (cliente == null || string.IsNullOrWhiteSpace(cliente.Cliente)) return;
@@ -1995,6 +1964,68 @@ namespace Kflmulti
                 // não falhar fluxo principal
             }
         }
+        
+        private void SalvarPrimeiraRenovacaoNoDispositivo()
+        {
+            try
+            {
+                Preferences.Default.Set(KEY_PRIMEIRA_RENOVACAO, JsonConvert.SerializeObject(_listaPrimeiraRenovacao));
+            }
+            catch { /* não falhar a UI */ }
+        }
+
+        // carregar lista
+        private void CarregarPrimeiraRenovacaoDoDispositivo()
+        {
+            try
+            {
+                var json = Preferences.Default.Get(KEY_PRIMEIRA_RENOVACAO, "");
+                if (string.IsNullOrEmpty(json))
+                {
+                    _listaPrimeiraRenovacao = new List<string>();
+                    return;
+                }
+
+                var nomes = JsonConvert.DeserializeObject<List<string>>(json) ?? new List<string>();
+                var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _listaPrimeiraRenovacao = new List<string>();
+
+                foreach (var n in nomes)
+                {
+                    if (string.IsNullOrWhiteSpace(n)) continue;
+                    var t = n.Trim();
+
+                    if (!set.Contains(t))
+                    {
+                        set.Add(t);
+                        _listaPrimeiraRenovacao.Add(t);
+                    }
+                }
+            }
+            catch
+            {
+                _listaPrimeiraRenovacao = new List<string>();
+            }
+        }
+
+        // adicionar cliente na lista de primeiras renovações
+        private void AddPrimeiraRenovacao(string clienteNome)
+        {
+            if (string.IsNullOrWhiteSpace(clienteNome))
+                return;
+
+            if (_listaPrimeiraRenovacao == null)
+                _listaPrimeiraRenovacao = new List<string>();
+
+            if (!_listaPrimeiraRenovacao.Contains(clienteNome.Trim(), StringComparer.OrdinalIgnoreCase))
+            {
+                _listaPrimeiraRenovacao.Add(clienteNome.Trim());
+                SalvarPrimeiraRenovacaoNoDispositivo(); // persiste imediatamente
+                Console.WriteLine($"Cliente {clienteNome} adicionado à lista de primeiras renovações.");
+            }
+        }
+
+
         private void AddNovo(string nome)
         {
             if (string.IsNullOrWhiteSpace(nome)) return;
@@ -2133,7 +2164,7 @@ namespace Kflmulti
             layout.Add(new Label { Text = "GESTÃO FINANCEIRA", FontSize = 20, FontAttributes = FontAttributes.Bold, HorizontalOptions = LayoutOptions.Center, TextColor = Color.FromArgb("#263238") });
 
             var gridAcoes = new Grid { ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() }, ColumnSpacing = 10 };
-            gridAcoes.Add(CriarBotaoAcao("📢 RELATÓRIO", "#1976D2", async () => await EnviarRelatorioWhatsapp()), 0, 0);
+            gridAcoes.Add(CriarBotaoAcao("📢 BAIXAR RELATÓRIO", "#1976D2", async () => await BaixarRelatorioPdf()), 0, 0);
             gridAcoes.Add(CriarBotaoAcao("📂 HISTÓRICO", "#455A64", async () => await VerHistoricoMensal()), 1, 0);
             layout.Add(gridAcoes);
 
@@ -2822,96 +2853,7 @@ namespace Kflmulti
             if (double.TryParse(cleaned, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double res)) return res;
             return 0;
         }
-        private string GerarRelatorioMensal()
-        {
-            // calcula receita bruta do mês atual
-            double receitaBruta = _listaNfLocal.Sum(nf => ParseValor(nf.Valor));
-
-            // calcula imposto e salva
-            double impostos = Math.Round(receitaBruta * 0.06, 2);
-            Preferences.Default.Set("imposto_mes_anterior", impostos);
-
-
-
-            // gera relatório detalhado
-            return GerarRelatorioMensal(DateTime.Now);
-        }
-        private string GerarRelatorioMensal(DateTime mesRef)
-        {
-            var ativosOk = _listaCompletaServidor.Where(c => c.Ativo?.Trim().ToLower() == "ok").ToList();
-            double totalFaturamentoAtivos = 0;
-            var resumo = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var cli in ativosOk)
-            {
-                double valor = ObterValorPorNomePlano(cli.Plano);
-                totalFaturamentoAtivos += valor;
-                string nomeP = (cli.Plano ?? "OUTROS").ToUpper().Trim();
-                if (resumo.ContainsKey(nomeP)) resumo[nomeP]++;
-                else resumo[nomeP] = 1;
-            }
-
-            // soma NFs do mês
-            double totalNfMes = 0;
-            foreach (var nf in _listaNfLocal ?? Enumerable.Empty<NfModel>())
-            {
-                var dt = ParseNfDate(nf.Data);
-                if (dt != null && dt.Value.Month == mesRef.Month && dt.Value.Year == mesRef.Year)
-                    totalNfMes += ParseValor(nf.Valor);
-            }
-
-            double receitaBruta = totalFaturamentoAtivos + totalNfMes;
-            double impostos = Math.Round(receitaBruta * 0.06, 2);
-            double meuAnuncioTotal = Preferences.Default.Get("meu_anuncio_total_mes", 0.0);
-
-            // --- RENOVADOS DO MÊS ---
-            double custoPorDia = Preferences.Default.Get(KEY_CUSTO_POR_DIA, 8.0);
-
-            var renovadosMes = (_listaNfLocal ?? Enumerable.Empty<NfModel>())
-                .Where(n =>
-                {
-                    var dt = ParseNfDate(n.Data);
-                    return dt != null
-                           && dt.Value.Month == mesRef.Month
-                           && dt.Value.Year == mesRef.Year;
-
-                })
-                .ToList();
-
-            int totalRenovadosMes = renovadosMes.Count;
-            string nomesRenovados = totalRenovadosMes > 0
-                ? string.Join("\n", renovadosMes.Select(r => $"✅ {r.Cliente} ({r.Plano}) - {r.Dias} dias"))
-                : "Nenhum renovado.";
-
-            // custo total de anúncios dos renovados (dias × custoPorDia)
-            double custoAnunciosRenovadosMes = renovadosMes.Sum(r => (r.Dias > 0 ? r.Dias : ObterDiasPorPlano(r.Plano)) * custoPorDia);
-            custoAnunciosRenovadosMes = Math.Round(custoAnunciosRenovadosMes, 2);
-
-            // --- Montagem do relatório ---
-            string texto = $"📊 *RELATÓRIO FINANCEIRO* - {mesRef:MM/yyyy}\n\n";
-            texto += $"✅ *Total Ativos:* {ativosOk.Count}\n\n";
-            foreach (var item in resumo) texto += $"• {item.Key}: {item.Value}\n";
-
-            texto += $"\n💰 *Faturamento (base ativos):* R$ {totalFaturamentoAtivos:N2}";
-            texto += $"\n🧾 *Entrada por NFs (mês):* R$ {totalNfMes:N2}";
-            texto += $"\n💸 *Imposto (6% sobre receita bruta):* R$ {impostos:N2}";
-            texto += $"\n📣 *Custo Meu Anúncio (mês):* R$ {meuAnuncioTotal:N2}";
-            texto += $"\n📢 *Custo Anúncios Renovados (mês):* R$ {custoAnunciosRenovadosMes:N2}";
-
-            texto += $"\n\n🔄 *Planos Renovados (Mês):* {totalRenovadosMes}";
-            texto += $"\n{nomesRenovados}";
-
-            texto += $"\n\n_Gerado automaticamente pelo App_";
-            return texto;
-        }
-        private void AddToTotalNfMes(double amount)
-        {
-            if (amount <= 0) return;
-            _totalNfMesPersistido = Math.Round(_totalNfMesPersistido + amount, 2);
-            Preferences.Default.Set(KEY_TOTAL_NF_MES, _totalNfMesPersistido);
-        }
-        private double GetTotalNfMesPersistido() =>
-            Preferences.Default.Get(KEY_TOTAL_NF_MES, _totalNfMesPersistido);
+        
 
         #endregion
 
@@ -4528,10 +4470,12 @@ namespace Kflmulti
         #endregion
 
         #region Relatórios e Fechamentos mensais
-        private async Task EnviarRelatorioWhatsapp()
+        private async Task BaixarRelatorioPdf()
         {
-            var mapaRelatorios = new Dictionary<string, string>();
-            mapaRelatorios.Add("🕒 PARCIAL DO MÊS", "PARCIAL");
+            var mapaRelatorios = new Dictionary<string, string>
+    {
+        { "🕒 PARCIAL DO MÊS", "PARCIAL" }
+    };
 
             for (int i = 0; i < 12; i++)
             {
@@ -4544,15 +4488,19 @@ namespace Kflmulti
                 }
             }
 
-            string escolha = await DisplayActionSheet("Selecione o Relatório para enviar:", "Cancelar", null, mapaRelatorios.Keys.ToArray());
-            if (escolha == "Cancelar" || !mapaRelatorios.ContainsKey(escolha))
+            string escolha = await DisplayActionSheet(
+                "Selecione o Relatório para baixar:",
+                "Cancelar",
+                string.Empty,
+                mapaRelatorios.Keys.ToArray()
+            );
+
+            if (string.IsNullOrEmpty(escolha) || escolha == "Cancelar" || !mapaRelatorios.ContainsKey(escolha))
                 return;
 
-            string conteudoRelatorio = "";
-            if (mapaRelatorios[escolha] == "PARCIAL")
-                conteudoRelatorio = GerarRelatorioMensal(DateTime.Now);
-            else
-                conteudoRelatorio = Preferences.Default.Get($"relatorio_{mapaRelatorios[escolha]}", "");
+            string conteudoRelatorio = mapaRelatorios[escolha] == "PARCIAL"
+                ? GerarRelatorioMensal(DateTime.Now)
+                : Preferences.Default.Get($"relatorio_{mapaRelatorios[escolha]}", "");
 
             if (string.IsNullOrEmpty(conteudoRelatorio))
             {
@@ -4560,37 +4508,45 @@ namespace Kflmulti
                 return;
             }
 
-            // 🔹 Aqui você gera o PDF a partir do texto
-            var pdfBytes = GerarPdfDoRelatorio(conteudoRelatorio);
 
-            // 🔹 Salva temporariamente o PDF no dispositivo
-            string filePath = IOPath.Combine(FileSystem.CacheDirectory, "relatorio.pdf");
+            string conteudoRelatorioSemSimbolos = RemoverSimbolos(conteudoRelatorio); 
+            var pdfBytes = GerarPdfDoRelatorio(conteudoRelatorioSemSimbolos);
+
+            // Salva em uma pasta acessível ao usuário
+            string fileName = $"relatorio_{mapaRelatorios[escolha]}.pdf";
+            string filePath = IOPath.Combine(FileSystem.AppDataDirectory, fileName);
 
             File.WriteAllBytes(filePath, pdfBytes);
 
-            // 🔹 Abre WhatsApp com o PDF anexado
-            await Share.RequestAsync(new ShareFileRequest
+            // Abre o PDF com o visualizador padrão do dispositivo
+            await Launcher.Default.OpenAsync(new OpenFileRequest
             {
-                Title = $"Relatório {escolha}",
-                File = new ShareFile(filePath)
+                File = new ReadOnlyFile(filePath)
             });
-        }      
+        }
         private byte[] GerarPdfDoRelatorio(string texto)
         {
             using (var doc = new PdfDocument())
             {
                 var page = doc.AddPage();
-                var gfx = XGraphics.FromPdfPage(page);
-                var font = new XFont("Arial", 12, XFontStyle.Regular);
+                using (var gfx = XGraphics.FromPdfPage(page))
+                {
+                    var font = new XFont("Arial", 12, XFontStyle.Regular);
 
-                // escreve o texto no PDF
-                gfx.DrawString(texto, font, XBrushes.Black,
-                    new XRect(20, 20, page.Width - 40, page.Height - 40),
-                    XStringFormats.TopLeft);
+                    // Divide o texto em linhas
+                    var linhas = texto.Split('\n');
+
+                    double y = 40; // posição inicial no eixo Y
+                    foreach (var linha in linhas)
+                    {
+                        gfx.DrawString(linha, font, XBrushes.Black, new XPoint(20, y));
+                        y += 20; // avança 20px para próxima linha
+                    }
+                }
 
                 using (var stream = new MemoryStream())
                 {
-                    doc.Save(stream, false);
+                    doc.Save(stream);
                     return stream.ToArray();
                 }
             }
@@ -4614,8 +4570,16 @@ namespace Kflmulti
                 }
             }
 
-            string escolha = await DisplayActionSheet("Selecione o Relatório:", "Cancelar", null, mapaRelatorios.Keys.ToArray());
-            if (escolha != "Cancelar" && mapaRelatorios.ContainsKey(escolha))
+            // ⚠️ Ajuste: destruction button não pode ser null
+            string escolha = await DisplayActionSheet(
+                "Selecione o Relatório:",
+                "Cancelar",
+                string.Empty, // em vez de null
+                mapaRelatorios.Keys.ToArray()
+            );
+
+            // ⚠️ Ajuste: proteger contra escolha nula
+            if (!string.IsNullOrEmpty(escolha) && escolha != "Cancelar" && mapaRelatorios.ContainsKey(escolha))
             {
                 string conteudoRelatorio = "";
 
@@ -4637,11 +4601,24 @@ namespace Kflmulti
                     return;
                 }
 
-                string acao = await DisplayActionSheet($"Relatório {escolha}", "Voltar", null, "Visualizar", "Enviar para WhatsApp");
+                string acao = await DisplayActionSheet(
+                    $"Relatório {escolha}",
+                    "Voltar",
+                    string.Empty, // em vez de null
+                    "Visualizar",
+                    "Enviar para WhatsApp"
+                );
+
                 if (acao == "Visualizar")
+                {
                     await DisplayAlert(escolha, conteudoRelatorio, "OK");
+                }
                 else if (acao == "Enviar para WhatsApp")
-                    await Launcher.Default.OpenAsync($"https://api.whatsapp.com/send?text={Uri.EscapeDataString(conteudoRelatorio)}");
+                {
+                    await Launcher.Default.OpenAsync(
+                        $"https://api.whatsapp.com/send?text={Uri.EscapeDataString(conteudoRelatorio)}"
+                    );
+                }
             }
         }
         private void VerificarFechamentoMensal()
@@ -4762,14 +4739,16 @@ namespace Kflmulti
         }
         private void LimparDadosMensais()
         {
-            // não mexe nos snapshots mensais (nfs_mes_MM_yyyy, relatorio_MM_yyyy)
-            // apenas zera acumulados que reiniciam a cada mês
+            
 
             _variableExpenses.Clear();
             _variableExpensesReds.Clear();
+            _listaRenovacoesMes.Clear();
             Preferences.Default.Set("despesas_cigarro_mes", 0.0);
             Preferences.Default.Set("despesas_mercado_mes", 0.0);
             Preferences.Default.Set("despesas_combustivel_mes", 0.0);
+
+            SalvarRenovacoesMesNoDispositivo();
 
             foreach (var f in _fixedExpenses)
                 f.Included = false;
@@ -4785,7 +4764,10 @@ namespace Kflmulti
             Preferences.Default.Set("ultimo_limpeza_mensal", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
 
             Preferences.Default.Set(KEY_TOTAL_NF_MES, 0.0);
+            
             _totalNfMesPersistido = 0.0;
+
+            
         }
         private void AdicionarNfAoMes(NfModel nf)
         {
@@ -4801,7 +4783,61 @@ namespace Kflmulti
 
             // Persiste novamente
             Preferences.Default.Set($"nfs_mes_{mesAnoChave}", JsonConvert.SerializeObject(nfsMes));
+        }       
+        private string GerarRelatorioMensal(DateTime mesRef)
+        {
+            // Recupera snapshot de NFs do mês
+            string chaveMes = mesRef.ToString("MM_yyyy");
+            var nfsMes = JsonConvert.DeserializeObject<List<NfModel>>(
+                Preferences.Default.Get($"nfs_mes_{chaveMes}", "")
+            ) ?? new List<NfModel>();
+
+            double totalNfMes = nfsMes.Sum(n => ParseValor(n.Valor));
+            double receitaBruta = totalNfMes;
+            double impostos = Math.Round(receitaBruta * 0.06, 2);
+            double meuAnuncioTotal = Preferences.Default.Get("meu_anuncio_total_mes", 0.0);
+
+            // --- RENOVADOS DO MÊS ---
+            double custoPorDia = Preferences.Default.Get(KEY_CUSTO_POR_DIA, 8.0);
+            int totalRenovadosMes = nfsMes.Count;
+            
+
+            string nomesRenovados = totalRenovadosMes > 0
+                ? string.Join("\n", nfsMes.Select(r =>
+                {
+                    string planoLimpo = LimparNomePlano(r.Plano);
+                    var dt = ParseNfDate(r.Data);
+                    string dataStr = dt?.ToString("dd/MM/yyyy") ?? "Data inválida";
+                    return $"{dataStr} - ✅ {r.Cliente} ({planoLimpo})";
+                }))
+                : "Nenhum renovado.";
+
+            double custoAnunciosRenovadosMes = nfsMes.Sum(r =>
+                (r.Dias > 0 ? r.Dias : ObterDiasPorPlano(r.Plano)) * custoPorDia
+            );
+            custoAnunciosRenovadosMes = Math.Round(custoAnunciosRenovadosMes, 2);
+
+            // --- Montagem do relatório ---
+            string texto = $"📊 *RELATÓRIO FINANCEIRO* - {mesRef:MM/yyyy}\n\n";
+            texto += $"\n💰 *Entrada por NFs (mês):* R$ {totalNfMes:N2}";
+            texto += $"\n💸 *Imposto (6% sobre receita bruta):* R$ {impostos:N2}";
+            texto += $"\n📣 *Custo Meu Anúncio (mês):* R$ {meuAnuncioTotal:N2}";
+            texto += $"\n📢 *Custo Anúncios Renovados (mês):* R$ {custoAnunciosRenovadosMes:N2}";
+
+            texto += $"\n\n🔄 *Planos Renovados (Mês):* {totalRenovadosMes}";
+            texto += $"\n{nomesRenovados}";
+
+            texto += $"\n\n_Gerado automaticamente pelo App_";
+            return texto;
         }
+        private void AddToTotalNfMes(double amount)
+        {
+            if (amount <= 0) return;
+            _totalNfMesPersistido = Math.Round(_totalNfMesPersistido + amount, 2);
+            Preferences.Default.Set(KEY_TOTAL_NF_MES, _totalNfMesPersistido);
+        }
+        private double GetTotalNfMesPersistido() =>
+            Preferences.Default.Get(KEY_TOTAL_NF_MES, _totalNfMesPersistido);      
         private double CalcularImpostoParaMes(DateTime mesRef)
         {
             // 1) tentativa de ler imposto a partir do relatório salvo para o mês (se existir)
@@ -4924,10 +4960,9 @@ namespace Kflmulti
                 string hoje = DateTime.Now.ToString("yyyy-MM-dd");
                 if (ultimo != hoje)
                 {
-                    // limpa NFs do dia (entrada hoje) e persiste limpeza
-                    //_listaNfLocal.Clear();
-                    //Preferences.Default.Remove("lista_nf_salva");
+                    
                     Preferences.Default.Set("entrada_hoje_ultimo_dia", hoje);
+                    AtualizarTotalClientes();
                 }
             }
             catch
@@ -5239,6 +5274,8 @@ namespace Kflmulti
             _listaRetornadosHoje.Clear();
             _listaPendentesPagos.Clear();
             _pendingHttpCommands.Clear();
+            _listaPrimeiraRenovacao.Clear();
+            
 
 
             SalvarPausadosNoDispositivo();
@@ -5247,7 +5284,44 @@ namespace Kflmulti
             SalvarRetornadosNoDispositivo();
             SalvarPendentesPagosNoDispositivo();
             SalvarPendingCommandsToPrefsAsync();
+            SalvarPrimeiraRenovacaoNoDispositivo();
+            
         }
+        private string RemoverSimbolos(string texto)
+        {
+            if (string.IsNullOrEmpty(texto))
+                return texto;
+
+            // Remove os principais ícones usados
+            string[] simbolos = { "📊", "✅", "💰", "💸", "📣", "📢", "🧾", "🔄" };
+
+            foreach (var s in simbolos)
+                texto = texto.Replace(s, "");
+
+            return texto.Trim();
+        }
+        private void AtualizarTotalClientes()
+        {
+            // Conta clientes atuais
+            int totalHoje = _listaCompletaServidor.Count;
+
+            // Recupera valor salvo de ontem (ou usa totalHoje se não existir)
+            int totalOntem = Preferences.Default.Get("total_clientes_ontem", totalHoje);
+
+            // Aqui você pode comparar
+            int diferenca = totalHoje - totalOntem;
+            if (diferenca > 0)
+                Console.WriteLine($"Hoje temos {diferenca} clientes a mais que ontem.");
+            else if (diferenca < 0)
+                Console.WriteLine($"Hoje temos {-diferenca} clientes a menos que ontem.");
+            else
+                Console.WriteLine("O número de clientes se manteve igual a ontem.");
+
+            // ⚠️ Salva o total de hoje para ser usado como "ontem" no próximo dia
+            Preferences.Default.Set("total_clientes_ontem", totalHoje);
+        }
+
+
 
 
         #endregion
