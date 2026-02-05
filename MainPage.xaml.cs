@@ -27,6 +27,7 @@ using System.IO;
 
 
 
+
 namespace Kflmulti
 {
     public partial class MainPage : ContentPage
@@ -92,7 +93,7 @@ namespace Kflmulti
 
         private double _fundoSaldo = 0.0;
         private double _SaldoFake = 320000;
-        bool fake = true;
+        bool fake = false;
         private List<InvestmentCard> _investments = new();
 
 
@@ -4477,6 +4478,7 @@ namespace Kflmulti
         { "🕒 PARCIAL DO MÊS", "PARCIAL" }
     };
 
+            // Adiciona últimos 12 meses disponíveis
             for (int i = 0; i < 12; i++)
             {
                 var dataRef = DateTime.Now.AddMonths(-i);
@@ -4488,6 +4490,7 @@ namespace Kflmulti
                 }
             }
 
+            // Escolha do relatório
             string escolha = await DisplayActionSheet(
                 "Selecione o Relatório para baixar:",
                 "Cancelar",
@@ -4498,6 +4501,7 @@ namespace Kflmulti
             if (string.IsNullOrEmpty(escolha) || escolha == "Cancelar" || !mapaRelatorios.ContainsKey(escolha))
                 return;
 
+            // Recupera conteúdo
             string conteudoRelatorio = mapaRelatorios[escolha] == "PARCIAL"
                 ? GerarRelatorioMensal(DateTime.Now)
                 : Preferences.Default.Get($"relatorio_{mapaRelatorios[escolha]}", "");
@@ -4508,21 +4512,43 @@ namespace Kflmulti
                 return;
             }
 
-
-            string conteudoRelatorioSemSimbolos = RemoverSimbolos(conteudoRelatorio); 
+            // Gera PDF
+            string conteudoRelatorioSemSimbolos = RemoverSimbolos(conteudoRelatorio);
             var pdfBytes = GerarPdfDoRelatorio(conteudoRelatorioSemSimbolos);
 
-            // Salva em uma pasta acessível ao usuário
             string fileName = $"relatorio_{mapaRelatorios[escolha]}.pdf";
-            string filePath = IOPath.Combine(FileSystem.AppDataDirectory, fileName);
 
-            File.WriteAllBytes(filePath, pdfBytes);
+#if ANDROID
+    // Android 11+ (inclui Android 15): usar MediaStore
+    var values = new Android.Content.ContentValues();
+    values.Put(Android.Provider.MediaStore.IMediaColumns.DisplayName, fileName);
+    values.Put(Android.Provider.MediaStore.IMediaColumns.MimeType, "application/pdf");
 
-            // Abre o PDF com o visualizador padrão do dispositivo
-            await Launcher.Default.OpenAsync(new OpenFileRequest
-            {
-                File = new ReadOnlyFile(filePath)
-            });
+    var uri = Android.App.Application.Context.ContentResolver.Insert(
+        Android.Provider.MediaStore.Downloads.ExternalContentUri, values);
+
+    using (var stream = Android.App.Application.Context.ContentResolver.OpenOutputStream(uri))
+    {
+        stream.Write(pdfBytes, 0, pdfBytes.Length);
+    }
+
+    Android.Widget.Toast.MakeText(
+        Android.App.Application.Context,
+        "PDF salvo em Downloads",
+        Android.Widget.ToastLength.Long
+    ).Show();
+
+#elif WINDOWS
+            // Windows: salva em Downloads do usuário
+            var downloadsPath = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Downloads"
+            );
+            var filePath = System.IO.Path.Combine(downloadsPath, fileName);
+            System.IO.File.WriteAllBytes(filePath, pdfBytes);
+
+            await DisplayAlert("Sucesso", $"PDF salvo em {filePath}", "OK");
+#endif
         }
         private byte[] GerarPdfDoRelatorio(string texto)
         {
