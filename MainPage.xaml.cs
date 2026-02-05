@@ -4557,7 +4557,7 @@ namespace Kflmulti
                 var page = doc.AddPage();
                 using (var gfx = XGraphics.FromPdfPage(page))
                 {
-                    var font = new XFont("Arial", 12, XFontStyle.Regular);
+                    var font = new XFont("OpenSans-Regular", 12, XFontStyle.Regular);
 
                     // Divide o texto em linhas
                     var linhas = texto.Split('\n');
@@ -4844,7 +4844,7 @@ namespace Kflmulti
             custoAnunciosRenovadosMes = Math.Round(custoAnunciosRenovadosMes, 2);
 
             // --- Montagem do relatório ---
-            string texto = $"📊 *RELATÓRIO FINANCEIRO* - {mesRef:MM/yyyy}\n\n";
+            string texto = $"📊 *RELATÓRIO FINANCEIRO KFLMULTI* - {mesRef:MM/yyyy}\n\n";
             texto += $"\n💰 *Entrada por NFs (mês):* R$ {totalNfMes:N2}";
             texto += $"\n💸 *Imposto (6% sobre receita bruta):* R$ {impostos:N2}";
             texto += $"\n📣 *Custo Meu Anúncio (mês):* R$ {meuAnuncioTotal:N2}";
@@ -4853,7 +4853,7 @@ namespace Kflmulti
             texto += $"\n\n🔄 *Planos Renovados (Mês):* {totalRenovadosMes}";
             texto += $"\n{nomesRenovados}";
 
-            texto += $"\n\n_Gerado automaticamente pelo App_";
+            texto += $"\n\n_Desenvolvedor do App Erick Lopes_";
             return texto;
         }
         private void AddToTotalNfMes(double amount)
@@ -5219,78 +5219,12 @@ namespace Kflmulti
         }
         private async Task ClearAppCacheAsync()
         {
-            try
-            {
-                // 1) Remover chaves conhecidas de Preferences (sem mexer em investimentos)
-                var keys = new[]
-                {
-            "lista_clientes_cache", "lista_clientes_cache_prev", "backup_vistos_hoje", "data_vistos",
-            "lista_pendentes_salva", "lista_nf_salva", "relatorio_mensal", "meu_anuncio_total_mes", "meu_anuncio_ultimo_dia",
-            "meu_anuncio_ativo", "saldo_dia", "cartao_dia", "saldo_pessoal","cartao_pessoal","saldo_empresa","cartao_empresa",
-            "total_clientes_ontem","data_ultima_meta","ultimo_limpeza_mensal",
-            KEY_FIXED, KEY_VAR, KEY_CUSTO_POR_DIA, KEY_CUSTO_ANUNCIOS_MES,
-            KEY_PAUSADOS_HOJE, KEY_RENOVADOS_HOJE, KEY_NOVOS_HOJE, KEY_RETORNADOS_HOJE, KEY_PENDENTES_PAGOS, KEY_TOTAL_NF_MES, KEY_PENDING_COMMANDS
-        };
-
-                foreach (var k in keys)
-                {
-                    try { Preferences.Default.Remove(k); } catch { }
-                }
-
-                // ⚠️ IMPORTANTE: não usar Preferences.Default.Clear()
-                // pois isso apagaria também KEY_INVESTMENTS e KEY_FUNDO_SALDO (investimentos).
-
-                // 2) Excluir arquivos em AppData e Cache (persistência local)
-                try
-                {
-                    var appData = FileSystem.AppDataDirectory;
-                    if (!string.IsNullOrEmpty(appData) && System.IO.Directory.Exists(appData))
-                    {
-                        foreach (var f in System.IO.Directory.GetFiles(appData, "*", System.IO.SearchOption.TopDirectoryOnly))
-                        {
-                            try { System.IO.File.Delete(f); } catch { }
-                        }
-                    }
-
-                    var cacheDir = FileSystem.CacheDirectory;
-                    if (!string.IsNullOrEmpty(cacheDir) && System.IO.Directory.Exists(cacheDir))
-                    {
-                        foreach (var f in System.IO.Directory.GetFiles(cacheDir, "*", System.IO.SearchOption.TopDirectoryOnly))
-                        {
-                            try { System.IO.File.Delete(f); } catch { }
-                        }
-                    }
-                }
-                catch { /* não falhar se IO der problema */ }
-
-                // 3) Limpar estados em memória usados pelo app (sem mexer em investimentos)
-                _listaCompletaServidor?.Clear();
-                _listaAtivosOk?.Clear();
-                _listaPendentesLocal?.Clear();
-                _listaVenceHoje?.Clear();
-                _listaRenovadosHoje?.Clear();
-                _listaNfLocal?.Clear();
-                _fixedExpenses?.Clear();
-                _variableExpenses?.Clear();
-                _variableExpensesReds?.Clear();
-                ClientesExibidos?.Clear();
-
-                // ⚠️ não limpar _listaInvestimentosLocal nem saldo do fundo
-
-                // Atualizar UI rapidamente
-                MainThread.BeginInvokeOnMainThread(() =>
-                {
-                    _searchEntry.Text = string.Empty;
-                    ExecutarBuscaReal();
-                });
-
-                await DisplayAlert("Cache", "Cache e dados locais removidos (Investimentos preservados). Reinicie o app para garantir estado totalmente limpo.", "OK");
-            }
-            catch (Exception ex)
-            {
-                await DisplayAlert("Erro ao limpar cache", ex.Message, "OK");
-            }
-        }
+            _listaVenceHoje.Clear();
+            _listaPendentesLocal.Clear();
+            _pendingHttpCommands.Clear();       
+            SalvarPendingCommandsToPrefsAsync();
+            SalvarPendentesNoDispositivo();
+        }               
         private void LimparListasEPersistir()
         {
             _listaNfLocal.Clear();
