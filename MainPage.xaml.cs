@@ -2165,7 +2165,7 @@ namespace Kflmulti
             layout.Add(new Label { Text = "GESTÃO FINANCEIRA", FontSize = 20, FontAttributes = FontAttributes.Bold, HorizontalOptions = LayoutOptions.Center, TextColor = Color.FromArgb("#263238") });
 
             var gridAcoes = new Grid { ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition() }, ColumnSpacing = 10 };
-            gridAcoes.Add(CriarBotaoAcao("📢 BAIXAR RELATÓRIO", "#1976D2", async () => await BaixarRelatorioPdf()), 0, 0);
+            gridAcoes.Add(CriarBotaoAcao("📢 RELATÓRIO", "#1976D2", async () => await BaixarRelatorioPdf()), 0, 0);
             gridAcoes.Add(CriarBotaoAcao("📂 HISTÓRICO", "#455A64", async () => await VerHistoricoMensal()), 1, 0);
             layout.Add(gridAcoes);
 
@@ -2702,7 +2702,7 @@ namespace Kflmulti
                 custoAnunciosDiasRestantes = 0.0;
             }
 
-            double gastosMes = totalFixedIncluded + fixoCalculado + impostoMesAnterior + custoAnunciosDiasRestantes + saldoInvestimento;
+            double gastosMes = totalFixedIncluded + fixoCalculado + custoAnunciosDiasRestantes + saldoInvestimento;
 
 
 
@@ -2737,7 +2737,7 @@ namespace Kflmulti
 
             resumoGrid.Add(new Label { Text = $"Fixos pagos: {totalFixedIncluded:C2}", TextColor = Colors.Blue }, 0, 3);
             resumoGrid.Add(new Label { Text = $"Fixos pendentes: {totalFixedNotIncluded:C2}", TextColor = Colors.Red }, 0, 4);
-            resumoGrid.Add(new Label { Text = $"Variáveis (total): {totalVariable:C2}", TextColor = Colors.Red }, 0, 5);
+            resumoGrid.Add(new Label { Text = $"Variáveis (total): {fixoCalculado:C2}", TextColor = Colors.Red }, 0, 5);
             resumoGrid.Add(new Label { Text = $"Custo anúncios (Dias restantes): {custoAnunciosDiasRestantes:C2}", TextColor = Colors.Red }, 0, 6);
             resumoGrid.Add(new Label { Text = $"Saldo Investimento: {saldoInvestimento:C2}", TextColor = Color.FromArgb("#1B5E20") }, 0, 7);
 
@@ -4418,8 +4418,13 @@ namespace Kflmulti
                 return false;
             }
 
-            var clientesParaEnviar = _listaNfLocal.Select(n => n.Cliente).ToList();
-            var dadosParaEnviar = new { clientes = clientesParaEnviar };
+            // Monta lista de objetos com cliente + valor
+            var dadosParaEnviar = _listaNfLocal.Select(n => new
+            {
+                cliente = n.Cliente,
+                valor = ObterValorPorNomePlano(n.Plano) // ou n.Valor se já existir na classe
+            }).ToList();
+
             int tentativas = 0;
             bool sucesso = false;
 
@@ -4437,16 +4442,12 @@ namespace Kflmulti
 
                         if (res.IsSuccessStatusCode)
                         {
-                            
                             sucesso = true;
-                            
-                            
                         }
                         else
                         {
                             System.Diagnostics.Debug.WriteLine($"Falha ao enviar NF (tentativa {tentativas}): {res.StatusCode}");
                         }
-
                     }
                     catch (Exception ex)
                     {
@@ -4456,17 +4457,19 @@ namespace Kflmulti
 
                 if (sucesso) break;
             }
-            
 
             if (!sucesso)
             {
-                MainThread.BeginInvokeOnMainThread(async () => {
+                MainThread.BeginInvokeOnMainThread(async () =>
+                {
                     await DisplayAlert("Erro", $"Não foi possível enviar as NFs após 3 tentativas.", "OK");
                 });
             }
 
             return sucesso;
         }
+
+
 
         #endregion
 
